@@ -1,0 +1,97 @@
+# SRDP 轻量化声音锁项目工程
+
+本目录是中期答辩用的正式工程目录，当前只保留正式 SRDP 自采数据、后端识别流水线、MATLAB 前端入口、正式结果和说明文档。
+
+## 目录结构
+
+- `code/python/`：后端主程序 `srdp.py`，包含 SNR 估计、特征提取、MFCC + LBG-VQ 声纹识别、MFCC-DTW 口令二次验证和图表生成。
+- `code/matlab/app/`：MATLAB 前端正式演示入口，只保留 `run_voice_lock_app.m`、`SRDPVoiceLockAppFixed.m` 和联调说明。
+- `code/matlab/legacy_app/`：组员原始 App Designer 文件和旧 `.m` 源码归档，不作为正式演示入口。
+- `code/matlab/legacy_preprocess/`、`code/legacy_notebooks/`：早期 MATLAB 预处理脚本和实验 notebook 归档，正式识别以 Python 后端为准。
+- `data/demo_audio/`：正式数据标注表 `metadata_srdp.csv` 和 99 条自采 wav，位于 `srdp_dataset/`。
+- `data/features/`：后端生成的正式特征文件 `srdp_features.npz`。
+- `models/`：正式 LBG-VQ 码本模型 `lbg_vq_codebooks.npz`。
+- `results/`：正式识别结果表、指标表、混淆矩阵和可视化图。
+- `docs/`：采集规范、答辩分工、PPT 和 MATLAB UI 说明等辅助材料；过期缺口记录放在 `docs/archive/`。
+
+## 当前正式效果
+
+当前正式配置是 `MFCC + LBG-VQ codebook=16`，并加入 `MFCC-DTW` 作为第二层口令相似度验证。
+
+| 方案 | 样本范围 | 正确数 | 准确率 |
+|---|---:|---:|---:|
+| 单层 LBG-VQ 声纹识别 | 全部评估样本 | 52/63 | 82.5% |
+| 两层验证：声纹 + 口令 | 全部评估样本 | 56/63 | 88.9% |
+| 两层验证 | 注册用户正常测试 | 17/24 | 70.8% |
+| 两层验证 | 错误口令拒识 | 36/36 | 100.0% |
+| 两层验证 | 非注册用户冒充拒识 | 3/3 | 100.0% |
+
+答辩建议表述：系统已经完成“自采录音 -> 特征提取 -> 声纹识别 -> 口令二次验证 -> 接受/拒绝”的闭环。当前结果足够支撑中期答辩，但不建议说成商用级成熟系统；更稳妥的说法是“初步有效，错误口令和冒充样本拒识表现较好，注册用户正常测试仍有误拒，后续继续优化阈值和扩充数据”。
+
+## 一键运行后端
+
+在项目根目录运行，下面两种写法等价，默认已经指向正式 `metadata_srdp.csv`：
+
+```powershell
+.\run.ps1 pipeline
+.\run.ps1 pipeline --metadata data/demo_audio/metadata_srdp.csv
+```
+
+这条命令会重新生成：
+
+```text
+results/tables/snr_estimates.csv
+data/features/srdp_features.npz
+results/tables/feature_summary.csv
+results/tables/lbg_vq_recognition_results.csv
+results/tables/voice_lock_metrics.csv
+results/figures/environment_feature_overview.png
+results/figures/snr_by_environment.png
+results/figures/accuracy_by_split.png
+results/figures/lbg_vq_confusion_matrix.png
+results/figures/lbg_vq_voice_only_confusion_matrix.png
+results/figures/passphrase_dtw_distance.png
+results/figures/error_breakdown.png
+results/figures/two_layer_pipeline.png
+models/lbg_vq_codebooks.npz
+```
+
+如果换电脑后没有 `code/python/venv/`，先在项目根目录执行：
+
+```powershell
+python -m venv code/python/venv
+.\code\python\venv\Scripts\python.exe -m pip install -r code/python/requirements.txt
+```
+
+## 启动 MATLAB 前端
+
+1. 先运行后端 pipeline，确保 `results/tables/lbg_vq_recognition_results.csv` 是最新的。
+2. 在 MATLAB 中打开并运行：
+
+```text
+code/matlab/app/run_voice_lock_app.m
+```
+
+3. 答辩时优先在“答辩快捷样例”中选择样本，点击“一键演示”。
+4. 如需临时换样本，可在“全部正式样本”中按类型筛选 63 个评估音频，或点击“手动选音频”选择 wav。
+5. 前端会自动加载音频、画波形和 MFCC、读取后端 CSV，并只显示当前样本的最终判定和详情。
+
+前端只负责演示、播放和特征展示；正式识别逻辑全部在 Python 后端。答辩演示建议采用快捷样例 + 固定后端结果，稳定性比现场动态调用 Python 更高。旧版 `SRDPVoiceLockApp.mlapp` 已归档到 `code/matlab/legacy_app/`，正式演示只运行 `SRDPVoiceLockAppFixed.m`。
+
+## 正式演示推荐音频
+
+前端已经内置以下快捷样例，答辩时直接从下拉框选择即可：
+
+- 正常通过：`data/demo_audio/srdp_dataset/S01/corridor/S01_corridor_004.wav`
+- 正常通过：`data/demo_audio/srdp_dataset/S02/corridor/S02_corridor_005.wav`
+- 错误口令拒绝：`data/demo_audio/srdp_dataset/S01_wrong/dorm/S01_wrong_003.wav`
+- 非注册用户拒绝：`data/demo_audio/srdp_dataset/U01/dorm/U01_corridor_001.wav`
+- 边界样例：`data/demo_audio/srdp_dataset/S01/lab/S01_lab_004.wav`
+
+若更换演示音频，优先从“全部正式样本”列表选择；如果是新增 wav，先重新运行一次 pipeline，确保它出现在 `lbg_vq_recognition_results.csv` 中。
+
+## 项目清理边界
+
+旧版 MATLAB App、早期 MATLAB 预处理脚本、实验 notebook 和过期缺口记录已经归档到 `legacy` / `archive` 目录，避免与正式入口混淆，同时保留前期工作证据。
+
+`code/python/venv/` 是本机运行环境，不建议提交到 Git；仓库已通过 `.gitignore` 忽略它。
