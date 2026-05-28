@@ -63,6 +63,63 @@ python -m venv code/python/venv
 .\code\python\venv\Scripts\python.exe -m pip install -r code/python/requirements.txt
 ```
 
+## 批量对比实验
+
+结题阶段用于补充“多特征融合”和“码本大小”对比表时，可运行：
+
+```powershell
+.\run.ps1 experiments
+```
+
+默认会复用 `data/features/srdp_features.npz`，批量比较：
+
+- 特征组合：`mfcc`、`mfcc_delta`、`all`
+- Codebook size：`8`、`16`、`32`
+
+每组实验的逐条结果、指标表和图会保存到 `results/experiments/`，汇总对比表保存到：
+
+```text
+results/tables/experiment_matrix.csv
+```
+
+如果新增或修改了 metadata，可加 `--refresh-features` 重新提取特征：
+
+```powershell
+.\run.ps1 experiments --refresh-features
+```
+
+## DTW 策略和融合校准
+
+`features` 命令会在 `feature_summary.csv` 中记录 `estimated_snr_db`、`quality_score` 和 `low_quality`；`vq` 命令支持在不改默认基线的前提下切换口令分支特征、DTW 多模板聚合方式、约束窗口、绕路惩罚，并在逐条结果中输出 `voice_score`、`passphrase_score`、`quality_score` 和 `fusion_score`。
+
+比较不同口令 DTW 策略：
+
+```powershell
+.\run.ps1 dtw-experiments
+```
+
+输出：
+
+```text
+results/tables/dtw_strategy_matrix.csv
+results/dtw_experiments/
+```
+
+系统扫描融合权重、融合阈值和音频质量权重：
+
+```powershell
+.\run.ps1 fusion-experiments
+```
+
+输出：
+
+```text
+results/tables/fusion_matrix.csv
+results/fusion_experiments/
+```
+
+当前安全优先筛选结果显示，`MFCC + codebook=16 + 全部 31 维特征 DTW` 可以在 False Accept 为 0 的前提下，把总体准确率提高到 90.5%，正常用户通过率提高到 75.0%，False Reject 降到 6 条。`quality_weight=0.2` 已纳入融合矩阵，当前数据下不会进一步改善最佳结果，说明现有误接受主要不是低质量录音造成的；后续新增远距离、低音量、背景噪声和回放样本后，这个质量分支会更有价值。`all + codebook=8` 仍然是高通过率候选，但会出现 1 条 False Accept，因此不能直接替代正式安全基线。
+
 ## 启动 MATLAB 前端
 
 1. 先运行后端 pipeline，确保 `results/tables/lbg_vq_recognition_results.csv` 是最新的。

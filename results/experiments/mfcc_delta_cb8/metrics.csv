@@ -1,0 +1,9 @@
+﻿stage,stage_label,split,total,correct,accuracy
+voice_only,LBG-VQ voice only,all,63,44,0.698413
+voice_only,LBG-VQ voice only,impostor,3,0,0.000000
+voice_only,LBG-VQ voice only,test,24,20,0.833333
+voice_only,LBG-VQ voice only,wrong_passphrase,36,24,0.666667
+two_layer,Voice + passphrase DTW,all,63,55,0.873016
+two_layer,Voice + passphrase DTW,impostor,3,3,1.000000
+two_layer,Voice + passphrase DTW,test,24,17,0.708333
+two_layer,Voice + passphrase DTW,wrong_passphrase,36,35,0.972222

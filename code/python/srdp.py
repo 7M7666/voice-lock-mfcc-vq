@@ -61,6 +61,7 @@ NPG_CONFUSION_CMAP = LinearSegmentedColormap.from_list(
     ["#FFFFFF", "#DDEBF2", NPG_CYAN, NPG_BLUE],
 )
 FIGURE_DPI = 300
+LOW_QUALITY_THRESHOLD = 0.35
 
 METADATA_FIELDS = [
     "file_path",
@@ -99,6 +100,11 @@ def project_path(path: str | Path) -> Path:
 
 
 def read_metadata(path: Path) -> list[dict[str, str]]:
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def read_csv_rows(path: Path) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8-sig", newline="") as f:
         return list(csv.DictReader(f))
 
@@ -281,6 +287,36 @@ def estimate_snr_db(audio_path: Path) -> tuple[float, float]:
     return float(snr_db), float(len(y) / sr)
 
 
+def percentile_spread(values: np.ndarray, low: float, high: float) -> float:
+    return float(max(np.percentile(values, high) - np.percentile(values, low), 1e-6))
+
+
+def fit_quality_baseline(rows: list[dict[str, str]], raw_vectors: list[np.ndarray], snr_values: list[float]) -> dict[str, float]:
+    train_indices = [idx for idx, row in enumerate(rows) if row.get("split", "").lower() == "train"]
+    if not train_indices:
+        train_indices = list(range(len(rows)))
+    train_snr = np.array([snr_values[idx] for idx in train_indices], dtype=np.float32)
+    train_rms = np.array([raw_vectors[idx][FEATURE_NAMES.index("rms_energy")] for idx in train_indices], dtype=np.float32)
+    train_flatness = np.array([raw_vectors[idx][FEATURE_NAMES.index("spectral_flatness")] for idx in train_indices], dtype=np.float32)
+    return {
+        "snr_floor": float(np.percentile(train_snr, 25)),
+        "snr_spread": percentile_spread(train_snr, 5, 25),
+        "rms_floor": float(np.percentile(train_rms, 10)),
+        "rms_spread": percentile_spread(train_rms, 10, 75),
+        "flatness_ceiling": float(np.percentile(train_flatness, 90)),
+        "flatness_spread": percentile_spread(train_flatness, 50, 90),
+    }
+
+
+def audio_quality_score(raw_vector: np.ndarray, snr_db: float, baseline: dict[str, float]) -> float:
+    rms = float(raw_vector[FEATURE_NAMES.index("rms_energy")])
+    flatness = float(raw_vector[FEATURE_NAMES.index("spectral_flatness")])
+    snr_penalty = max(0.0, (baseline["snr_floor"] - snr_db) / baseline["snr_spread"])
+    rms_penalty = max(0.0, (baseline["rms_floor"] - rms) / baseline["rms_spread"])
+    flatness_penalty = max(0.0, (flatness - baseline["flatness_ceiling"]) / baseline["flatness_spread"])
+    return float(min(2.0, 0.50 * snr_penalty + 0.30 * rms_penalty + 0.20 * flatness_penalty))
+
+
 def select_dims(feature_names: list[str], feature_set: str) -> list[int]:
     if feature_set == "mfcc":
         prefixes = ("mfcc_",)
@@ -339,10 +375,18 @@ def quantization_distance(x: np.ndarray, codebook: np.ndarray) -> float:
     return float(np.mean(np.min(distances, axis=1)))
 
 
-def dtw_distance(x: np.ndarray, y: np.ndarray) -> float:
+def dtw_distance(
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    window_ratio: float = 1.0,
+    warp_penalty: float = 0.0,
+) -> float:
     if x.size == 0 or y.size == 0:
         return float("inf")
     n, m = x.shape[0], y.shape[0]
+    constrained = 0 < window_ratio < 1.0
+    band = max(abs(n - m), int(round(max(n, m) * window_ratio))) if constrained else m
     prev = np.full(m + 1, np.inf, dtype=np.float64)
     curr = np.full(m + 1, np.inf, dtype=np.float64)
     prev_steps = np.zeros(m + 1, dtype=np.int32)
@@ -352,15 +396,25 @@ def dtw_distance(x: np.ndarray, y: np.ndarray) -> float:
         curr.fill(np.inf)
         curr_steps.fill(0)
         frame_costs = np.linalg.norm(y - x[i - 1], axis=1)
-        for j in range(1, m + 1):
-            options = (prev[j], curr[j - 1], prev[j - 1])
+        if constrained:
+            center = int(round(i * m / n))
+            start = max(1, center - band)
+            end = min(m, center + band)
+        else:
+            start, end = 1, m
+        for j in range(start, end + 1):
+            options = (
+                prev[j] + warp_penalty,
+                curr[j - 1] + warp_penalty,
+                prev[j - 1],
+            )
             choice = int(np.argmin(options))
             if choice == 0:
-                best_cost, best_steps = prev[j], prev_steps[j]
+                best_cost, best_steps = options[0], prev_steps[j]
             elif choice == 1:
-                best_cost, best_steps = curr[j - 1], curr_steps[j - 1]
+                best_cost, best_steps = options[1], curr_steps[j - 1]
             else:
-                best_cost, best_steps = prev[j - 1], prev_steps[j - 1]
+                best_cost, best_steps = options[2], prev_steps[j - 1]
             curr[j] = best_cost + float(frame_costs[j - 1])
             curr_steps[j] = best_steps + 1
         prev, curr = curr, prev
@@ -382,10 +436,56 @@ def train_threshold(
     return float(max(base, np.max(own) + 1e-6))
 
 
+def safe_ratio(value: float, threshold: float) -> float:
+    return float(value / threshold) if threshold > 0 else float("inf")
+
+
+def aggregate_distances(distances: list[float], mode: str) -> float:
+    if not distances:
+        return float("inf")
+    values = sorted(float(value) for value in distances)
+    if mode == "min":
+        return values[0]
+    if mode == "mean3":
+        count = min(3, len(values))
+        return float(np.mean(values[:count]))
+    if mode == "mean5":
+        count = min(5, len(values))
+        return float(np.mean(values[:count]))
+    if mode == "median":
+        return float(np.median(values))
+    raise ValueError(f"unknown passphrase aggregate mode: {mode}")
+
+
+def passphrase_template_distance(
+    sample: np.ndarray,
+    templates: list[np.ndarray],
+    aggregate: str,
+    *,
+    exclude_index: int | None = None,
+    window_ratio: float = 1.0,
+    warp_penalty: float = 0.0,
+) -> float:
+    distances = [
+        dtw_distance(
+            sample,
+            template,
+            window_ratio=window_ratio,
+            warp_penalty=warp_penalty,
+        )
+        for idx, template in enumerate(templates)
+        if idx != exclude_index
+    ]
+    return aggregate_distances(distances, aggregate)
+
+
 def train_passphrase_thresholds(
     train_by_speaker: dict[str, list[np.ndarray]],
     mode: str,
     factor: float,
+    aggregate: str,
+    window_ratio: float,
+    warp_penalty: float,
 ) -> tuple[dict[str, float], dict[str, list[float]]]:
     thresholds, train_distances = {}, {}
     for speaker, templates in train_by_speaker.items():
@@ -395,8 +495,16 @@ def train_passphrase_thresholds(
             continue
         distances = []
         for idx, template in enumerate(templates):
-            others = [other for j, other in enumerate(templates) if j != idx]
-            distances.append(min(dtw_distance(template, other) for other in others))
+            distances.append(
+                passphrase_template_distance(
+                    template,
+                    templates,
+                    aggregate,
+                    exclude_index=idx,
+                    window_ratio=window_ratio,
+                    warp_penalty=warp_penalty,
+                )
+            )
         values = np.array(distances, dtype=np.float32)
         if mode == "mean_std":
             threshold = float(values.mean() + factor * values.std())
@@ -419,6 +527,9 @@ def load_feature_archive(path: Path):
         else np.array([""] * count)
     )
     rows = []
+    quality_scores = data["quality_score"] if "quality_score" in data.files else np.zeros(count, dtype=np.float32)
+    estimated_snr = data["estimated_snr_db"] if "estimated_snr_db" in data.files else np.zeros(count, dtype=np.float32)
+    low_quality = data["low_quality"] if "low_quality" in data.files else np.array(["False"] * count)
     for idx in range(count):
         rows.append(
             {
@@ -427,6 +538,9 @@ def load_feature_archive(path: Path):
                 "environment": str(data["environment"][idx]),
                 "split": str(data["split"][idx]).lower(),
                 "expected_decision": str(expected_values[idx]),
+                "estimated_snr_db": f"{float(estimated_snr[idx]):.6f}",
+                "quality_score": f"{float(quality_scores[idx]):.6f}",
+                "low_quality": str(low_quality[idx]),
             }
         )
     names = [str(x) for x in data["feature_names"]]
@@ -564,22 +678,33 @@ def plot_environment_overview(rows: list[dict[str, str]], vectors: list[np.ndarr
 def cmd_features(args: argparse.Namespace) -> None:
     ensure_dirs()
     metadata_rows = read_metadata(project_path(args.metadata))
-    rows, raw_features = [], []
+    rows, raw_features, snr_values = [], [], []
     for row in metadata_rows:
         audio_path = project_path(row["file_path"])
         if not audio_path.exists():
             print(f"skip missing audio: {audio_path}")
             continue
         result = extract_one(audio_path)
+        snr_db, _ = estimate_snr_db(audio_path)
         out = dict(row)
         out["frames"] = str(result.features.shape[0])
         out["duration_sec"] = f"{result.duration_sec:.6f}"
         out["voiced_start_sec"] = f"{result.voiced_start_sec:.6f}"
         out["voiced_end_sec"] = f"{result.voiced_end_sec:.6f}"
+        out["estimated_snr_db"] = f"{snr_db:.6f}"
         rows.append(out)
         raw_features.append(result.features)
+        snr_values.append(snr_db)
     if not raw_features:
         raise RuntimeError("no valid audio features extracted")
+
+    raw_vectors = [feat.mean(axis=0).astype(np.float32) for feat in raw_features]
+    quality_baseline = fit_quality_baseline(rows, raw_vectors, snr_values)
+    quality_scores = [
+        audio_quality_score(raw_vec, snr_db, quality_baseline)
+        for raw_vec, snr_db in zip(raw_vectors, snr_values)
+    ]
+    low_quality_flags = [score >= LOW_QUALITY_THRESHOLD for score in quality_scores]
 
     train_features = [feat for row, feat in zip(rows, raw_features) if row.get("split", "").lower() == "train"]
     mean, std = zscore_fit(train_features or raw_features)
@@ -596,6 +721,11 @@ def cmd_features(args: argparse.Namespace) -> None:
         "split": np.array([row.get("split", "") for row in rows]),
         "expected_decision": np.array([row.get("expected_decision", "") for row in rows]),
         "utterance_vectors": np.vstack(vectors),
+        "estimated_snr_db": np.array(snr_values, dtype=np.float32),
+        "quality_score": np.array(quality_scores, dtype=np.float32),
+        "low_quality": np.array([str(flag) for flag in low_quality_flags]),
+        "quality_baseline": np.array([quality_baseline[key] for key in sorted(quality_baseline)], dtype=np.float32),
+        "quality_baseline_keys": np.array(sorted(quality_baseline)),
     }
     for idx, feat in enumerate(features):
         archive[f"features_{idx:04d}"] = feat
@@ -613,10 +743,15 @@ def cmd_features(args: argparse.Namespace) -> None:
         "duration_sec",
         "voiced_start_sec",
         "voiced_end_sec",
+        "estimated_snr_db",
+        "quality_score",
+        "low_quality",
     ] + [f"mean_{name}" for name in FEATURE_NAMES]
     summary_rows = []
-    for row, vec in zip(rows, vectors):
+    for row, vec, quality_score, low_quality in zip(rows, vectors, quality_scores, low_quality_flags):
         out = {key: row.get(key, "") for key in fieldnames}
+        out["quality_score"] = f"{quality_score:.6f}"
+        out["low_quality"] = str(low_quality)
         out.update({f"mean_{name}": f"{value:.6f}" for name, value in zip(FEATURE_NAMES, vec)})
         summary_rows.append(out)
     write_rows(project_path(args.summary), summary_rows, fieldnames)
@@ -639,7 +774,11 @@ def save_vq_results(path: Path, rows: list[dict[str, str]]) -> None:
             "voice_correct",
             "passphrase_distance",
             "passphrase_threshold",
+            "passphrase_score",
             "passphrase_passed",
+            "fusion_score",
+            "fusion_threshold",
+            "fusion_passed",
             "decision",
             "accepted",
             "correct",
@@ -647,6 +786,10 @@ def save_vq_results(path: Path, rows: list[dict[str, str]]) -> None:
             "split",
             "distance",
             "threshold",
+            "voice_score",
+            "estimated_snr_db",
+            "quality_score",
+            "low_quality",
         ],
     )
 
@@ -836,7 +979,7 @@ def cmd_vq(args: argparse.Namespace) -> None:
     ensure_dirs()
     names, rows, features = load_feature_archive(project_path(args.features))
     dims = select_dims(names, args.feature_set)
-    passphrase_dims = select_dims(names, "mfcc")
+    passphrase_dims = select_dims(names, args.passphrase_feature_set)
     sliced = [feat[:, dims] for feat in features]
     passphrase_features = [feat[:, passphrase_dims] for feat in features]
 
@@ -873,6 +1016,9 @@ def cmd_vq(args: argparse.Namespace) -> None:
         passphrase_train_by_speaker,
         args.passphrase_threshold_mode,
         args.passphrase_threshold_factor,
+        args.passphrase_aggregate,
+        args.dtw_window_ratio,
+        args.dtw_warp_penalty,
     )
 
     eval_indices = [idx for idx, row in enumerate(rows) if row["split"] != "train"]
@@ -888,27 +1034,50 @@ def cmd_vq(args: argparse.Namespace) -> None:
     total = 0
     for idx in eval_indices:
         row = rows[idx]
+        quality_score_value = float(row.get("quality_score") or 0.0)
         distances = {speaker: quantization_distance(sliced[idx], cb) for speaker, cb in codebooks.items()}
         pred = min(distances, key=distances.get)
         distance = distances[pred]
         threshold = thresholds[pred]
+        voice_score = safe_ratio(distance, threshold)
         voice_accepted = distance <= threshold
         voice_decision = pred if voice_accepted else "REJECT"
         passphrase_distance = ""
         passphrase_threshold = ""
+        passphrase_score = ""
         passphrase_passed = ""
+        fusion_score = ""
+        fusion_threshold = ""
+        fusion_passed = ""
         decision = voice_decision
         if args.passphrase_check and voice_accepted and pred in passphrase_train_by_speaker:
-            passphrase_distance_value = min(
-                dtw_distance(passphrase_features[idx], template)
-                for template in passphrase_train_by_speaker[pred]
+            passphrase_distance_value = passphrase_template_distance(
+                passphrase_features[idx],
+                passphrase_train_by_speaker[pred],
+                args.passphrase_aggregate,
+                window_ratio=args.dtw_window_ratio,
+                warp_penalty=args.dtw_warp_penalty,
             )
             passphrase_threshold_value = passphrase_thresholds[pred]
+            passphrase_score_value = safe_ratio(passphrase_distance_value, passphrase_threshold_value)
             passphrase_ok = passphrase_distance_value <= passphrase_threshold_value
+            fusion_score_value = (
+                args.fusion_voice_weight * voice_score
+                + (1.0 - args.fusion_voice_weight) * passphrase_score_value
+                + args.quality_weight * quality_score_value
+            )
+            fusion_ok = fusion_score_value <= args.fusion_threshold
             passphrase_distance = f"{passphrase_distance_value:.6f}"
             passphrase_threshold = f"{passphrase_threshold_value:.6f}"
+            passphrase_score = f"{passphrase_score_value:.6f}"
             passphrase_passed = str(passphrase_ok)
-            decision = pred if passphrase_ok else "REJECT"
+            fusion_score = f"{fusion_score_value:.6f}"
+            fusion_threshold = f"{args.fusion_threshold:.6f}"
+            fusion_passed = str(fusion_ok)
+            if args.decision_mode == "fusion":
+                decision = pred if passphrase_ok and fusion_ok else "REJECT"
+            else:
+                decision = pred if passphrase_ok else "REJECT"
         true = row["speaker_id"] if row["speaker_id"] in codebooks else "REJECT"
         expected = (row.get("expected_decision") or "").strip()
         if not expected:
@@ -933,7 +1102,11 @@ def cmd_vq(args: argparse.Namespace) -> None:
                 "voice_correct": str(is_voice_correct),
                 "passphrase_distance": passphrase_distance,
                 "passphrase_threshold": passphrase_threshold,
+                "passphrase_score": passphrase_score,
                 "passphrase_passed": passphrase_passed,
+                "fusion_score": fusion_score,
+                "fusion_threshold": fusion_threshold,
+                "fusion_passed": fusion_passed,
                 "decision": decision,
                 "accepted": str(decision != "REJECT"),
                 "correct": str(is_correct),
@@ -941,6 +1114,10 @@ def cmd_vq(args: argparse.Namespace) -> None:
                 "split": row["split"],
                 "distance": f"{distance:.6f}",
                 "threshold": f"{threshold:.6f}",
+                "voice_score": f"{voice_score:.6f}",
+                "estimated_snr_db": row.get("estimated_snr_db", ""),
+                "quality_score": f"{quality_score_value:.6f}",
+                "low_quality": row.get("low_quality", "False"),
             }
         )
 
@@ -966,9 +1143,18 @@ def cmd_vq(args: argparse.Namespace) -> None:
         passphrase_thresholds=np.array([passphrase_thresholds[s] for s in sorted(codebooks)], dtype=np.float32),
         passphrase_threshold_mode=np.array([args.passphrase_threshold_mode]),
         passphrase_threshold_factor=np.array([args.passphrase_threshold_factor], dtype=np.float32),
+        passphrase_feature_set=np.array([args.passphrase_feature_set]),
+        passphrase_aggregate=np.array([args.passphrase_aggregate]),
+        dtw_window_ratio=np.array([args.dtw_window_ratio], dtype=np.float32),
+        dtw_warp_penalty=np.array([args.dtw_warp_penalty], dtype=np.float32),
         passphrase_train_distances=passphrase_train_matrix,
+        decision_mode=np.array([args.decision_mode]),
+        fusion_voice_weight=np.array([args.fusion_voice_weight], dtype=np.float32),
+        fusion_threshold=np.array([args.fusion_threshold], dtype=np.float32),
+        quality_weight=np.array([args.quality_weight], dtype=np.float32),
         feature_set=np.array([args.feature_set]),
         feature_names=np.array([names[idx] for idx in dims]),
+        passphrase_feature_names=np.array([names[idx] for idx in passphrase_dims]),
         **{f"codebook_{speaker}": codebooks[speaker] for speaker in sorted(codebooks)},
     )
     print(f"Evaluated {total} utterances; voice_accuracy={voice_correct / total if total else 0:.3f}; final_accuracy={correct / total if total else 0:.3f}")
@@ -993,6 +1179,22 @@ def cmd_pipeline(args: argparse.Namespace) -> None:
         args.passphrase_threshold_mode,
         "--passphrase-threshold-factor",
         str(args.passphrase_threshold_factor),
+        "--passphrase-feature-set",
+        args.passphrase_feature_set,
+        "--passphrase-aggregate",
+        args.passphrase_aggregate,
+        "--dtw-window-ratio",
+        str(args.dtw_window_ratio),
+        "--dtw-warp-penalty",
+        str(args.dtw_warp_penalty),
+        "--decision-mode",
+        args.decision_mode,
+        "--fusion-voice-weight",
+        str(args.fusion_voice_weight),
+        "--fusion-threshold",
+        str(args.fusion_threshold),
+        "--quality-weight",
+        str(args.quality_weight),
     ]
     if not args.passphrase_check:
         vq_command.append("--disable-passphrase-check")
@@ -1003,6 +1205,524 @@ def cmd_pipeline(args: argparse.Namespace) -> None:
     ):
         print(">", " ".join(command), flush=True)
         subprocess.run(command, cwd=PROJECT_ROOT, check=True)
+
+
+def metric_accuracy(metrics: list[dict[str, str]], stage: str, split: str) -> str:
+    for row in metrics:
+        if row["stage"] == stage and row["split"] == split:
+            return row["accuracy"]
+    return ""
+
+
+def count_error_types(rows: list[dict[str, str]]) -> tuple[int, int, int]:
+    false_reject = 0
+    false_accept = 0
+    wrong_speaker = 0
+    for row in rows:
+        expected = row["expected_decision"]
+        decision = row["decision"]
+        if expected != "REJECT" and decision == "REJECT":
+            false_reject += 1
+        elif expected == "REJECT" and decision != "REJECT":
+            false_accept += 1
+        elif expected != "REJECT" and decision not in (expected, "REJECT"):
+            wrong_speaker += 1
+    return false_reject, false_accept, wrong_speaker
+
+
+DTW_STRATEGIES = {
+    "min": {"aggregate": "min", "window_ratio": 1.0, "warp_penalty": 0.0},
+    "mean3": {"aggregate": "mean3", "window_ratio": 1.0, "warp_penalty": 0.0},
+    "median": {"aggregate": "median", "window_ratio": 1.0, "warp_penalty": 0.0},
+    "constrained10": {"aggregate": "min", "window_ratio": 0.10, "warp_penalty": 0.0},
+    "constrained20": {"aggregate": "min", "window_ratio": 0.20, "warp_penalty": 0.0},
+    "weighted10": {"aggregate": "min", "window_ratio": 1.0, "warp_penalty": 0.10},
+}
+
+
+def parse_feature_codebook_configs(values: list[str]) -> list[tuple[str, int]]:
+    configs = []
+    for value in values:
+        if ":" not in value:
+            raise ValueError(f"config must use feature_set:codebook_size, got {value!r}")
+        feature_set, codebook_size = value.split(":", 1)
+        if feature_set not in {"mfcc", "mfcc_delta", "all"}:
+            raise ValueError(f"unknown feature set in config: {feature_set}")
+        configs.append((feature_set, int(codebook_size)))
+    return configs
+
+
+def factor_tag(value: float) -> str:
+    return str(value).replace(".", "p")
+
+
+def build_vq_command(
+    *,
+    python: str,
+    this_file: Path,
+    features: str,
+    feature_set: str,
+    codebook_size: int,
+    passphrase_feature_set: str,
+    passphrase_aggregate: str,
+    passphrase_threshold_mode: str,
+    passphrase_threshold_factor: float,
+    dtw_window_ratio: float,
+    dtw_warp_penalty: float,
+    decision_mode: str,
+    fusion_voice_weight: float,
+    fusion_threshold: float,
+    quality_weight: float,
+    result_path: Path,
+    metrics_path: Path,
+    experiment_dir: Path,
+    model_path: Path,
+) -> list[str]:
+    return [
+        python,
+        str(this_file),
+        "vq",
+        "--features",
+        features,
+        "--feature-set",
+        feature_set,
+        "--codebook-size",
+        str(codebook_size),
+        "--passphrase-threshold-mode",
+        passphrase_threshold_mode,
+        "--passphrase-threshold-factor",
+        str(passphrase_threshold_factor),
+        "--passphrase-feature-set",
+        passphrase_feature_set,
+        "--passphrase-aggregate",
+        passphrase_aggregate,
+        "--dtw-window-ratio",
+        str(dtw_window_ratio),
+        "--dtw-warp-penalty",
+        str(dtw_warp_penalty),
+        "--decision-mode",
+        decision_mode,
+        "--fusion-voice-weight",
+        str(fusion_voice_weight),
+        "--fusion-threshold",
+        str(fusion_threshold),
+        "--quality-weight",
+        str(quality_weight),
+        "--results",
+        rel(result_path),
+        "--metrics",
+        rel(metrics_path),
+        "--figure",
+        rel(experiment_dir / "confusion_matrix.png"),
+        "--voice-figure",
+        rel(experiment_dir / "voice_only_confusion_matrix.png"),
+        "--accuracy-figure",
+        rel(experiment_dir / "accuracy_by_split.png"),
+        "--passphrase-figure",
+        rel(experiment_dir / "passphrase_dtw_distance.png"),
+        "--error-figure",
+        rel(experiment_dir / "error_breakdown.png"),
+        "--pipeline-figure",
+        rel(experiment_dir / "two_layer_pipeline.png"),
+        "--model",
+        rel(model_path),
+    ]
+
+
+def summarize_decisions(rows: list[dict[str, str]], decisions: list[str]) -> dict[str, str]:
+    correct = [decision == row["expected_decision"] for row, decision in zip(rows, decisions)]
+
+    def accuracy(split: str) -> str:
+        idxs = [
+            idx
+            for idx, row in enumerate(rows)
+            if split == "all" or row["split"] == split
+        ]
+        if not idxs:
+            return ""
+        return f"{sum(correct[idx] for idx in idxs) / len(idxs):.6f}"
+
+    false_reject = 0
+    false_accept = 0
+    wrong_speaker = 0
+    for row, decision in zip(rows, decisions):
+        expected = row["expected_decision"]
+        if expected != "REJECT" and decision == "REJECT":
+            false_reject += 1
+        elif expected == "REJECT" and decision != "REJECT":
+            false_accept += 1
+        elif expected != "REJECT" and decision not in (expected, "REJECT"):
+            wrong_speaker += 1
+
+    return {
+        "fusion_all_accuracy": accuracy("all"),
+        "registered_test_accuracy": accuracy("test"),
+        "wrong_passphrase_reject_rate": accuracy("wrong_passphrase"),
+        "impostor_reject_rate": accuracy("impostor"),
+        "false_reject": str(false_reject),
+        "false_accept": str(false_accept),
+        "wrong_speaker": str(wrong_speaker),
+    }
+
+
+def fusion_decisions(rows: list[dict[str, str]], voice_weight: float, threshold: float, quality_weight: float) -> list[str]:
+    decisions = []
+    for row in rows:
+        voice_score = float(row["voice_score"])
+        if voice_score > 1.0 or not row["passphrase_score"]:
+            decisions.append("REJECT")
+            continue
+        passphrase_score = float(row["passphrase_score"])
+        quality_score = float(row.get("quality_score") or 0.0)
+        fusion_score = (
+            voice_weight * voice_score
+            + (1.0 - voice_weight) * passphrase_score
+            + quality_weight * quality_score
+        )
+        if passphrase_score <= 1.0 and fusion_score <= threshold:
+            decisions.append(row["pred_speaker"])
+        else:
+            decisions.append("REJECT")
+    return decisions
+
+
+def cmd_experiments(args: argparse.Namespace) -> None:
+    python = sys.executable
+    this_file = Path(__file__).resolve()
+    features_path = project_path(args.features)
+    if args.refresh_features or not features_path.exists():
+        feature_command = [
+            python,
+            str(this_file),
+            "features",
+            "--metadata",
+            args.metadata,
+            "--output",
+            args.features,
+        ]
+        print(">", " ".join(feature_command), flush=True)
+        subprocess.run(feature_command, cwd=PROJECT_ROOT, check=True)
+
+    summary_rows = []
+    output_dir = project_path(args.output_dir)
+    model_dir = project_path(args.model_dir)
+    for feature_set in args.feature_sets:
+        for codebook_size in args.codebook_sizes:
+            tag = f"{feature_set}_cb{codebook_size}"
+            experiment_dir = output_dir / tag
+            result_path = experiment_dir / "recognition_results.csv"
+            metrics_path = experiment_dir / "metrics.csv"
+            model_path = model_dir / f"{tag}_codebooks.npz"
+            vq_command = [
+                python,
+                str(this_file),
+                "vq",
+                "--features",
+                args.features,
+                "--feature-set",
+                feature_set,
+                "--codebook-size",
+                str(codebook_size),
+                "--passphrase-threshold-mode",
+                args.passphrase_threshold_mode,
+                "--passphrase-threshold-factor",
+                str(args.passphrase_threshold_factor),
+                "--passphrase-feature-set",
+                args.passphrase_feature_set,
+                "--passphrase-aggregate",
+                args.passphrase_aggregate,
+                "--dtw-window-ratio",
+                str(args.dtw_window_ratio),
+                "--dtw-warp-penalty",
+                str(args.dtw_warp_penalty),
+                "--decision-mode",
+                args.decision_mode,
+                "--fusion-voice-weight",
+                str(args.fusion_voice_weight),
+                "--fusion-threshold",
+                str(args.fusion_threshold),
+                "--quality-weight",
+                str(args.quality_weight),
+                "--results",
+                rel(result_path),
+                "--metrics",
+                rel(metrics_path),
+                "--figure",
+                rel(experiment_dir / "confusion_matrix.png"),
+                "--voice-figure",
+                rel(experiment_dir / "voice_only_confusion_matrix.png"),
+                "--accuracy-figure",
+                rel(experiment_dir / "accuracy_by_split.png"),
+                "--passphrase-figure",
+                rel(experiment_dir / "passphrase_dtw_distance.png"),
+                "--error-figure",
+                rel(experiment_dir / "error_breakdown.png"),
+                "--pipeline-figure",
+                rel(experiment_dir / "two_layer_pipeline.png"),
+                "--model",
+                rel(model_path),
+            ]
+            print(">", " ".join(vq_command), flush=True)
+            subprocess.run(vq_command, cwd=PROJECT_ROOT, check=True)
+
+            metrics = read_csv_rows(metrics_path)
+            results = read_csv_rows(result_path)
+            false_reject, false_accept, wrong_speaker = count_error_types(results)
+            summary_rows.append(
+                {
+                    "feature_set": feature_set,
+                    "codebook_size": str(codebook_size),
+                    "passphrase_feature_set": args.passphrase_feature_set,
+                    "passphrase_aggregate": args.passphrase_aggregate,
+                    "passphrase_threshold_factor": str(args.passphrase_threshold_factor),
+                    "dtw_window_ratio": str(args.dtw_window_ratio),
+                    "dtw_warp_penalty": str(args.dtw_warp_penalty),
+                    "decision_mode": args.decision_mode,
+                    "fusion_threshold": str(args.fusion_threshold),
+                    "quality_weight": str(args.quality_weight),
+                    "voice_all_accuracy": metric_accuracy(metrics, "voice_only", "all"),
+                    "two_layer_all_accuracy": metric_accuracy(metrics, "two_layer", "all"),
+                    "registered_test_accuracy": metric_accuracy(metrics, "two_layer", "test"),
+                    "wrong_passphrase_reject_rate": metric_accuracy(metrics, "two_layer", "wrong_passphrase"),
+                    "impostor_reject_rate": metric_accuracy(metrics, "two_layer", "impostor"),
+                    "false_reject": str(false_reject),
+                    "false_accept": str(false_accept),
+                    "wrong_speaker": str(wrong_speaker),
+                    "results_path": rel(result_path),
+                    "metrics_path": rel(metrics_path),
+                }
+            )
+
+    write_rows(
+        project_path(args.summary),
+        summary_rows,
+        [
+            "feature_set",
+            "codebook_size",
+            "passphrase_feature_set",
+            "passphrase_aggregate",
+            "passphrase_threshold_factor",
+            "dtw_window_ratio",
+            "dtw_warp_penalty",
+            "decision_mode",
+            "fusion_threshold",
+            "quality_weight",
+            "voice_all_accuracy",
+            "two_layer_all_accuracy",
+            "registered_test_accuracy",
+            "wrong_passphrase_reject_rate",
+            "impostor_reject_rate",
+            "false_reject",
+            "false_accept",
+            "wrong_speaker",
+            "results_path",
+            "metrics_path",
+        ],
+    )
+    print(f"Saved experiment matrix: {project_path(args.summary)}")
+
+
+def cmd_dtw_experiments(args: argparse.Namespace) -> None:
+    python = sys.executable
+    this_file = Path(__file__).resolve()
+    summary_rows = []
+    output_dir = project_path(args.output_dir)
+    model_dir = project_path(args.model_dir)
+    configs = parse_feature_codebook_configs(args.configs)
+
+    for feature_set, codebook_size in configs:
+        for passphrase_feature_set in args.passphrase_feature_sets:
+            for strategy_name in args.strategies:
+                strategy = DTW_STRATEGIES[strategy_name]
+                tag = f"{feature_set}_cb{codebook_size}_{passphrase_feature_set}_{strategy_name}"
+                experiment_dir = output_dir / tag
+                result_path = experiment_dir / "recognition_results.csv"
+                metrics_path = experiment_dir / "metrics.csv"
+                model_path = model_dir / f"{tag}_codebooks.npz"
+                vq_command = build_vq_command(
+                    python=python,
+                    this_file=this_file,
+                    features=args.features,
+                    feature_set=feature_set,
+                    codebook_size=codebook_size,
+                    passphrase_feature_set=passphrase_feature_set,
+                    passphrase_aggregate=strategy["aggregate"],
+                    passphrase_threshold_mode=args.passphrase_threshold_mode,
+                    passphrase_threshold_factor=args.passphrase_threshold_factor,
+                    dtw_window_ratio=strategy["window_ratio"],
+                    dtw_warp_penalty=strategy["warp_penalty"],
+                    decision_mode="two_layer",
+                    fusion_voice_weight=0.5,
+                    fusion_threshold=1.0,
+                    quality_weight=0.0,
+                    result_path=result_path,
+                    metrics_path=metrics_path,
+                    experiment_dir=experiment_dir,
+                    model_path=model_path,
+                )
+                print(">", " ".join(vq_command), flush=True)
+                subprocess.run(vq_command, cwd=PROJECT_ROOT, check=True)
+
+                metrics = read_csv_rows(metrics_path)
+                results = read_csv_rows(result_path)
+                false_reject, false_accept, wrong_speaker = count_error_types(results)
+                summary_rows.append(
+                    {
+                        "feature_set": feature_set,
+                        "codebook_size": str(codebook_size),
+                        "passphrase_feature_set": passphrase_feature_set,
+                        "dtw_strategy": strategy_name,
+                        "passphrase_aggregate": strategy["aggregate"],
+                        "passphrase_threshold_mode": args.passphrase_threshold_mode,
+                        "passphrase_threshold_factor": str(args.passphrase_threshold_factor),
+                        "dtw_window_ratio": str(strategy["window_ratio"]),
+                        "dtw_warp_penalty": str(strategy["warp_penalty"]),
+                        "voice_all_accuracy": metric_accuracy(metrics, "voice_only", "all"),
+                        "two_layer_all_accuracy": metric_accuracy(metrics, "two_layer", "all"),
+                        "registered_test_accuracy": metric_accuracy(metrics, "two_layer", "test"),
+                        "wrong_passphrase_reject_rate": metric_accuracy(metrics, "two_layer", "wrong_passphrase"),
+                        "impostor_reject_rate": metric_accuracy(metrics, "two_layer", "impostor"),
+                        "false_reject": str(false_reject),
+                        "false_accept": str(false_accept),
+                        "wrong_speaker": str(wrong_speaker),
+                        "results_path": rel(result_path),
+                        "metrics_path": rel(metrics_path),
+                    }
+                )
+
+    write_rows(
+        project_path(args.summary),
+        summary_rows,
+        [
+            "feature_set",
+            "codebook_size",
+            "passphrase_feature_set",
+            "dtw_strategy",
+            "passphrase_aggregate",
+            "passphrase_threshold_mode",
+            "passphrase_threshold_factor",
+            "dtw_window_ratio",
+            "dtw_warp_penalty",
+            "voice_all_accuracy",
+            "two_layer_all_accuracy",
+            "registered_test_accuracy",
+            "wrong_passphrase_reject_rate",
+            "impostor_reject_rate",
+            "false_reject",
+            "false_accept",
+            "wrong_speaker",
+            "results_path",
+            "metrics_path",
+        ],
+    )
+    print(f"Saved DTW strategy matrix: {project_path(args.summary)}")
+
+
+def cmd_fusion_experiments(args: argparse.Namespace) -> None:
+    python = sys.executable
+    this_file = Path(__file__).resolve()
+    summary_rows = []
+    output_dir = project_path(args.output_dir)
+    model_dir = project_path(args.model_dir)
+    configs = parse_feature_codebook_configs(args.configs)
+
+    for feature_set, codebook_size in configs:
+        for passphrase_feature_set in args.passphrase_feature_sets:
+            for factor in args.passphrase_threshold_factors:
+                tag = (
+                    f"{feature_set}_cb{codebook_size}_{passphrase_feature_set}_"
+                    f"factor{factor_tag(factor)}"
+                )
+                experiment_dir = output_dir / tag
+                result_path = experiment_dir / "recognition_results.csv"
+                metrics_path = experiment_dir / "metrics.csv"
+                model_path = model_dir / f"{tag}_codebooks.npz"
+                vq_command = build_vq_command(
+                    python=python,
+                    this_file=this_file,
+                    features=args.features,
+                    feature_set=feature_set,
+                    codebook_size=codebook_size,
+                    passphrase_feature_set=passphrase_feature_set,
+                    passphrase_aggregate=args.passphrase_aggregate,
+                    passphrase_threshold_mode=args.passphrase_threshold_mode,
+                    passphrase_threshold_factor=factor,
+                    dtw_window_ratio=args.dtw_window_ratio,
+                    dtw_warp_penalty=args.dtw_warp_penalty,
+                    decision_mode="two_layer",
+                    fusion_voice_weight=0.5,
+                    fusion_threshold=1.0,
+                    quality_weight=0.0,
+                    result_path=result_path,
+                    metrics_path=metrics_path,
+                    experiment_dir=experiment_dir,
+                    model_path=model_path,
+                )
+                print(">", " ".join(vq_command), flush=True)
+                subprocess.run(vq_command, cwd=PROJECT_ROOT, check=True)
+
+                metrics = read_csv_rows(metrics_path)
+                results = read_csv_rows(result_path)
+                false_reject, false_accept, wrong_speaker = count_error_types(results)
+                for voice_weight in args.fusion_voice_weights:
+                    for fusion_threshold in args.fusion_thresholds:
+                        for quality_weight in args.quality_weights:
+                            fusion_metrics = summarize_decisions(
+                                results,
+                                fusion_decisions(results, voice_weight, fusion_threshold, quality_weight),
+                            )
+                            summary_rows.append(
+                                {
+                                    "feature_set": feature_set,
+                                    "codebook_size": str(codebook_size),
+                                    "passphrase_feature_set": passphrase_feature_set,
+                                    "passphrase_aggregate": args.passphrase_aggregate,
+                                    "passphrase_threshold_mode": args.passphrase_threshold_mode,
+                                    "passphrase_threshold_factor": str(factor),
+                                    "dtw_window_ratio": str(args.dtw_window_ratio),
+                                    "dtw_warp_penalty": str(args.dtw_warp_penalty),
+                                    "fusion_voice_weight": str(voice_weight),
+                                    "fusion_threshold": str(fusion_threshold),
+                                    "quality_weight": str(quality_weight),
+                                    "two_layer_all_accuracy": metric_accuracy(metrics, "two_layer", "all"),
+                                    "two_layer_false_reject": str(false_reject),
+                                    "two_layer_false_accept": str(false_accept),
+                                    "two_layer_wrong_speaker": str(wrong_speaker),
+                                    **fusion_metrics,
+                                    "results_path": rel(result_path),
+                                }
+                            )
+
+    write_rows(
+        project_path(args.summary),
+        summary_rows,
+        [
+            "feature_set",
+            "codebook_size",
+            "passphrase_feature_set",
+            "passphrase_aggregate",
+            "passphrase_threshold_mode",
+            "passphrase_threshold_factor",
+            "dtw_window_ratio",
+            "dtw_warp_penalty",
+            "fusion_voice_weight",
+            "fusion_threshold",
+            "quality_weight",
+            "two_layer_all_accuracy",
+            "two_layer_false_reject",
+            "two_layer_false_accept",
+            "two_layer_wrong_speaker",
+            "fusion_all_accuracy",
+            "registered_test_accuracy",
+            "wrong_passphrase_reject_rate",
+            "impostor_reject_rate",
+            "false_reject",
+            "false_accept",
+            "wrong_speaker",
+            "results_path",
+        ],
+    )
+    print(f"Saved fusion matrix: {project_path(args.summary)}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1046,6 +1766,14 @@ def build_parser() -> argparse.ArgumentParser:
     vq.set_defaults(passphrase_check=True)
     vq.add_argument("--passphrase-threshold-mode", choices=["mean_std", "max_scale"], default="mean_std")
     vq.add_argument("--passphrase-threshold-factor", type=float, default=1.0)
+    vq.add_argument("--passphrase-feature-set", choices=["mfcc", "mfcc_delta", "all"], default="mfcc")
+    vq.add_argument("--passphrase-aggregate", choices=["min", "mean3", "mean5", "median"], default="min")
+    vq.add_argument("--dtw-window-ratio", type=float, default=1.0)
+    vq.add_argument("--dtw-warp-penalty", type=float, default=0.0)
+    vq.add_argument("--decision-mode", choices=["two_layer", "fusion"], default="two_layer")
+    vq.add_argument("--fusion-voice-weight", type=float, default=0.5)
+    vq.add_argument("--fusion-threshold", type=float, default=1.0)
+    vq.add_argument("--quality-weight", type=float, default=0.0)
     vq.add_argument("--results", default="results/tables/lbg_vq_recognition_results.csv")
     vq.add_argument("--metrics", default="results/tables/voice_lock_metrics.csv")
     vq.add_argument("--figure", default="results/figures/lbg_vq_confusion_matrix.png")
@@ -1065,7 +1793,70 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline.set_defaults(passphrase_check=True)
     pipeline.add_argument("--passphrase-threshold-mode", choices=["mean_std", "max_scale"], default="mean_std")
     pipeline.add_argument("--passphrase-threshold-factor", type=float, default=1.0)
+    pipeline.add_argument("--passphrase-feature-set", choices=["mfcc", "mfcc_delta", "all"], default="mfcc")
+    pipeline.add_argument("--passphrase-aggregate", choices=["min", "mean3", "mean5", "median"], default="min")
+    pipeline.add_argument("--dtw-window-ratio", type=float, default=1.0)
+    pipeline.add_argument("--dtw-warp-penalty", type=float, default=0.0)
+    pipeline.add_argument("--decision-mode", choices=["two_layer", "fusion"], default="two_layer")
+    pipeline.add_argument("--fusion-voice-weight", type=float, default=0.5)
+    pipeline.add_argument("--fusion-threshold", type=float, default=1.0)
+    pipeline.add_argument("--quality-weight", type=float, default=0.0)
     pipeline.set_defaults(func=cmd_pipeline)
+
+    experiments = sub.add_parser("experiments", help="run feature/codebook comparison matrix")
+    experiments.add_argument("--metadata", default="data/demo_audio/metadata_srdp.csv")
+    experiments.add_argument("--features", default="data/features/srdp_features.npz")
+    experiments.add_argument(
+        "--feature-sets",
+        nargs="+",
+        choices=["mfcc", "mfcc_delta", "all"],
+        default=["mfcc", "mfcc_delta", "all"],
+    )
+    experiments.add_argument("--codebook-sizes", nargs="+", type=int, default=[8, 16, 32])
+    experiments.add_argument("--passphrase-threshold-mode", choices=["mean_std", "max_scale"], default="mean_std")
+    experiments.add_argument("--passphrase-threshold-factor", type=float, default=1.0)
+    experiments.add_argument("--passphrase-feature-set", choices=["mfcc", "mfcc_delta", "all"], default="mfcc")
+    experiments.add_argument("--passphrase-aggregate", choices=["min", "mean3", "mean5", "median"], default="min")
+    experiments.add_argument("--dtw-window-ratio", type=float, default=1.0)
+    experiments.add_argument("--dtw-warp-penalty", type=float, default=0.0)
+    experiments.add_argument("--decision-mode", choices=["two_layer", "fusion"], default="two_layer")
+    experiments.add_argument("--fusion-voice-weight", type=float, default=0.5)
+    experiments.add_argument("--fusion-threshold", type=float, default=1.0)
+    experiments.add_argument("--quality-weight", type=float, default=0.0)
+    experiments.add_argument("--refresh-features", action="store_true")
+    experiments.add_argument("--output-dir", default="results/experiments")
+    experiments.add_argument("--model-dir", default="models/experiments")
+    experiments.add_argument("--summary", default="results/tables/experiment_matrix.csv")
+    experiments.set_defaults(func=cmd_experiments)
+
+    dtw = sub.add_parser("dtw-experiments", help="compare passphrase DTW strategies")
+    dtw.add_argument("--features", default="data/features/srdp_features.npz")
+    dtw.add_argument("--configs", nargs="+", default=["mfcc:16", "all:8"])
+    dtw.add_argument("--passphrase-feature-sets", nargs="+", choices=["mfcc", "mfcc_delta", "all"], default=["mfcc"])
+    dtw.add_argument("--strategies", nargs="+", choices=sorted(DTW_STRATEGIES), default=["min", "mean3", "median", "constrained10", "weighted10"])
+    dtw.add_argument("--passphrase-threshold-mode", choices=["mean_std", "max_scale"], default="mean_std")
+    dtw.add_argument("--passphrase-threshold-factor", type=float, default=1.0)
+    dtw.add_argument("--output-dir", default="results/dtw_experiments")
+    dtw.add_argument("--model-dir", default="models/dtw_experiments")
+    dtw.add_argument("--summary", default="results/tables/dtw_strategy_matrix.csv")
+    dtw.set_defaults(func=cmd_dtw_experiments)
+
+    fusion = sub.add_parser("fusion-experiments", help="run rule-based fusion weight/threshold matrix")
+    fusion.add_argument("--features", default="data/features/srdp_features.npz")
+    fusion.add_argument("--configs", nargs="+", default=["mfcc:16", "all:8"])
+    fusion.add_argument("--passphrase-feature-sets", nargs="+", choices=["mfcc", "mfcc_delta", "all"], default=["mfcc", "all"])
+    fusion.add_argument("--passphrase-aggregate", choices=["min", "mean3", "mean5", "median"], default="min")
+    fusion.add_argument("--passphrase-threshold-mode", choices=["mean_std", "max_scale"], default="mean_std")
+    fusion.add_argument("--passphrase-threshold-factors", nargs="+", type=float, default=[0.4, 0.6, 0.8, 1.0])
+    fusion.add_argument("--dtw-window-ratio", type=float, default=1.0)
+    fusion.add_argument("--dtw-warp-penalty", type=float, default=0.0)
+    fusion.add_argument("--fusion-voice-weights", nargs="+", type=float, default=[0.3, 0.5, 0.7])
+    fusion.add_argument("--fusion-thresholds", nargs="+", type=float, default=[0.85, 0.9, 0.95, 1.0, 1.05])
+    fusion.add_argument("--quality-weights", nargs="+", type=float, default=[0.0, 0.2])
+    fusion.add_argument("--output-dir", default="results/fusion_experiments")
+    fusion.add_argument("--model-dir", default="models/fusion_experiments")
+    fusion.add_argument("--summary", default="results/tables/fusion_matrix.csv")
+    fusion.set_defaults(func=cmd_fusion_experiments)
 
     demo = sub.add_parser("demo", help="run the formal SRDP audio pipeline")
     demo.set_defaults(
@@ -1077,6 +1868,14 @@ def build_parser() -> argparse.ArgumentParser:
                 passphrase_check=True,
                 passphrase_threshold_mode="mean_std",
                 passphrase_threshold_factor=1.0,
+                passphrase_feature_set="mfcc",
+                passphrase_aggregate="min",
+                dtw_window_ratio=1.0,
+                dtw_warp_penalty=0.0,
+                decision_mode="two_layer",
+                fusion_voice_weight=0.5,
+                fusion_threshold=1.0,
+                quality_weight=0.0,
             )
         )
     )

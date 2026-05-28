@@ -1,0 +1,10 @@
+﻿feature_set,codebook_size,voice_all_accuracy,two_layer_all_accuracy,registered_test_accuracy,wrong_passphrase_reject_rate,impostor_reject_rate,false_reject,false_accept,wrong_speaker,results_path,metrics_path
+mfcc,8,0.746032,0.888889,0.708333,1.000000,1.000000,7,0,0,results/experiments/mfcc_cb8/recognition_results.csv,results/experiments/mfcc_cb8/metrics.csv
+mfcc,16,0.825397,0.888889,0.708333,1.000000,1.000000,7,0,0,results/experiments/mfcc_cb16/recognition_results.csv,results/experiments/mfcc_cb16/metrics.csv
+mfcc,32,0.825397,0.841270,0.583333,1.000000,1.000000,10,0,0,results/experiments/mfcc_cb32/recognition_results.csv,results/experiments/mfcc_cb32/metrics.csv
+mfcc_delta,8,0.698413,0.873016,0.708333,0.972222,1.000000,7,1,0,results/experiments/mfcc_delta_cb8/recognition_results.csv,results/experiments/mfcc_delta_cb8/metrics.csv
+mfcc_delta,16,0.761905,0.873016,0.708333,0.972222,1.000000,7,1,0,results/experiments/mfcc_delta_cb16/recognition_results.csv,results/experiments/mfcc_delta_cb16/metrics.csv
+mfcc_delta,32,0.825397,0.857143,0.666667,0.972222,1.000000,8,1,0,results/experiments/mfcc_delta_cb32/recognition_results.csv,results/experiments/mfcc_delta_cb32/metrics.csv
+all,8,0.746032,0.904762,0.791667,0.972222,1.000000,5,1,0,results/experiments/all_cb8/recognition_results.csv,results/experiments/all_cb8/metrics.csv
+all,16,0.793651,0.888889,0.750000,0.972222,1.000000,6,1,0,results/experiments/all_cb16/recognition_results.csv,results/experiments/all_cb16/metrics.csv
+all,32,0.809524,0.857143,0.666667,0.972222,1.000000,8,1,0,results/experiments/all_cb32/recognition_results.csv,results/experiments/all_cb32/metrics.csv

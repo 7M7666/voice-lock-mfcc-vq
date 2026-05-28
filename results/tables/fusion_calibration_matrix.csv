@@ -1,0 +1,2 @@
+﻿feature_set,codebook_size,passphrase_feature_set,passphrase_aggregate,passphrase_threshold_factor,decision_mode,fusion_threshold,voice_all_accuracy,two_layer_all_accuracy,registered_test_accuracy,wrong_passphrase_reject_rate,impostor_reject_rate,false_reject,false_accept,wrong_speaker,results_path,metrics_path
+all,8,all,min,0.4,two_layer,1.0,0.746032,0.888889,0.708333,1.000000,1.000000,7,0,0,results/experiments_fusion/all_cb8/recognition_results.csv,results/experiments_fusion/all_cb8/metrics.csv
