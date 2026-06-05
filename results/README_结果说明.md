@@ -8,6 +8,10 @@
 - `tables/feature_summary.csv`：每条录音的特征统计摘要。
 - `tables/lbg_vq_recognition_results.csv`：逐条样本的声纹判定、口令验证和最终判定。
 - `tables/voice_lock_metrics.csv`：单层声纹识别和两层声音锁的汇总指标。
+- `tables/experiment_matrix.csv`：特征组合与 codebook size 的批量对比结果。
+- `tables/dtw_strategy_matrix.csv`：不同口令 DTW 策略的对比结果。
+- `tables/fusion_matrix.csv`：融合权重、融合阈值和音频质量权重的扫描结果。
+- `tables/recommended_config.csv`：按安全优先规则筛出的结题推荐配置。
 
 ## 图表
 

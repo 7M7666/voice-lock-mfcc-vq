@@ -3,3 +3,4 @@ sounddevice
 soundfile
 librosa
 matplotlib
+PySide6

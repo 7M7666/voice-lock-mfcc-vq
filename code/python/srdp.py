@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -75,6 +76,22 @@ METADATA_FIELDS = [
     "notes",
 ]
 
+OPTIONAL_METADATA_FIELDS = [
+    "device",
+    "distance",
+    "trial_type",
+    "is_replay",
+]
+
+METADATA_FIELDS += OPTIONAL_METADATA_FIELDS
+
+RESULT_METADATA_FIELDS = [
+    "device",
+    "recording_distance",
+    "trial_type",
+    "is_replay",
+]
+
 
 @dataclass
 class AudioFeature:
@@ -83,6 +100,40 @@ class AudioFeature:
     sample_rate: int
     voiced_start_sec: float
     voiced_end_sec: float
+
+
+@dataclass
+class AudioInferenceFeatures:
+    features: np.ndarray
+    duration_sec: float
+    sample_rate: int
+    voiced_start_sec: float
+    voiced_end_sec: float
+    estimated_snr_db: float
+    quality_score: float
+    low_quality: bool
+
+
+@dataclass
+class VoiceLockModel:
+    feature_names: list[str]
+    zscore_mean: np.ndarray
+    zscore_std: np.ndarray
+    codebooks: dict[str, np.ndarray]
+    thresholds: dict[str, float]
+    passphrase_thresholds: dict[str, float]
+    passphrase_train_by_speaker: dict[str, list[np.ndarray]]
+    feature_set: str
+    passphrase_feature_set: str
+    passphrase_aggregate: str
+    dtw_window_ratio: float
+    dtw_warp_penalty: float
+    decision_mode: str
+    fusion_voice_weight: float
+    fusion_threshold: float
+    quality_weight: float
+    quality_baseline: dict[str, float]
+    passphrase_check: bool = True
 
 
 def ensure_dirs() -> None:
@@ -94,14 +145,25 @@ def rel(path: Path) -> str:
     return str(path.relative_to(PROJECT_ROOT)).replace("\\", "/")
 
 
+def display_path(path: Path) -> str:
+    try:
+        return rel(path)
+    except ValueError:
+        return str(path)
+
+
 def project_path(path: str | Path) -> Path:
     path = Path(path)
     return path if path.is_absolute() else PROJECT_ROOT / path
 
 
+def normalise_metadata_row(row: dict[str, str]) -> dict[str, str]:
+    return {field: row.get(field, "") for field in METADATA_FIELDS}
+
+
 def read_metadata(path: Path) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8-sig", newline="") as f:
-        return list(csv.DictReader(f))
+        return [normalise_metadata_row(row) for row in csv.DictReader(f)]
 
 
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
@@ -145,10 +207,10 @@ def append_metadata(path: Path, rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     exists = path.exists()
     with path.open("a", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=METADATA_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=METADATA_FIELDS, extrasaction="ignore")
         if not exists:
             writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(normalise_metadata_row(row) for row in rows)
 
 
 def load_audio(path: Path, target_sr: int = TARGET_SR) -> tuple[np.ndarray, int]:
@@ -541,10 +603,263 @@ def load_feature_archive(path: Path):
                 "estimated_snr_db": f"{float(estimated_snr[idx]):.6f}",
                 "quality_score": f"{float(quality_scores[idx]):.6f}",
                 "low_quality": str(low_quality[idx]),
+                **{
+                    field: str(data[field][idx]) if field in data.files else ""
+                    for field in OPTIONAL_METADATA_FIELDS
+                },
             }
         )
     names = [str(x) for x in data["feature_names"]]
     return names, rows, features
+
+
+def archive_string(data, key: str, default: str) -> str:
+    if key not in data.files:
+        return default
+    value = data[key]
+    if np.ndim(value) == 0:
+        return str(value)
+    return str(value[0]) if len(value) else default
+
+
+def archive_float(data, key: str, default: float) -> float:
+    if key not in data.files:
+        return default
+    value = data[key]
+    if np.ndim(value) == 0:
+        return float(value)
+    return float(value[0]) if len(value) else default
+
+
+def archive_bool(data, key: str, default: bool) -> bool:
+    value = archive_string(data, key, str(default))
+    return value.strip().lower() in {"1", "true", "yes", "y"}
+
+
+def load_quality_baseline(data) -> dict[str, float]:
+    if "quality_baseline" not in data.files or "quality_baseline_keys" not in data.files:
+        return {}
+    keys = [str(key) for key in data["quality_baseline_keys"]]
+    values = [float(value) for value in data["quality_baseline"]]
+    return dict(zip(keys, values))
+
+
+def load_model(
+    model_path: str | Path = "models/lbg_vq_codebooks.npz",
+    features_path: str | Path = "data/features/srdp_features.npz",
+) -> VoiceLockModel:
+    model_data = np.load(project_path(model_path), allow_pickle=False)
+    feature_data = np.load(project_path(features_path), allow_pickle=False)
+    names, rows, features = load_feature_archive(project_path(features_path))
+    speakers = [str(speaker) for speaker in model_data["speakers"]]
+    feature_set = archive_string(model_data, "feature_set", "mfcc")
+    passphrase_feature_set = archive_string(model_data, "passphrase_feature_set", "mfcc")
+    passphrase_dims = select_dims(names, passphrase_feature_set)
+    passphrase_train_by_speaker = {speaker: [] for speaker in speakers}
+    for row, feat in zip(rows, features):
+        speaker = row["speaker_id"]
+        if row["split"] == "train" and speaker in passphrase_train_by_speaker:
+            passphrase_train_by_speaker[speaker].append(feat[:, passphrase_dims])
+    return VoiceLockModel(
+        feature_names=names,
+        zscore_mean=feature_data["zscore_mean"].astype(np.float32),
+        zscore_std=feature_data["zscore_std"].astype(np.float32),
+        codebooks={speaker: model_data[f"codebook_{speaker}"] for speaker in speakers},
+        thresholds={
+            speaker: float(value)
+            for speaker, value in zip(speakers, model_data["thresholds"])
+        },
+        passphrase_thresholds={
+            speaker: float(value)
+            for speaker, value in zip(speakers, model_data["passphrase_thresholds"])
+        },
+        passphrase_train_by_speaker=passphrase_train_by_speaker,
+        feature_set=feature_set,
+        passphrase_feature_set=passphrase_feature_set,
+        passphrase_aggregate=archive_string(model_data, "passphrase_aggregate", "min"),
+        dtw_window_ratio=archive_float(model_data, "dtw_window_ratio", 1.0),
+        dtw_warp_penalty=archive_float(model_data, "dtw_warp_penalty", 0.0),
+        decision_mode=archive_string(model_data, "decision_mode", "two_layer"),
+        fusion_voice_weight=archive_float(model_data, "fusion_voice_weight", 0.5),
+        fusion_threshold=archive_float(model_data, "fusion_threshold", 1.0),
+        quality_weight=archive_float(model_data, "quality_weight", 0.0),
+        quality_baseline=load_quality_baseline(feature_data),
+        passphrase_check=archive_bool(model_data, "passphrase_check", True),
+    )
+
+
+def extract_one_audio_features(audio_path: str | Path, model: VoiceLockModel) -> AudioInferenceFeatures:
+    audio_path = project_path(audio_path)
+    result = extract_one(audio_path)
+    snr_db, _ = estimate_snr_db(audio_path)
+    raw_vector = result.features.mean(axis=0).astype(np.float32)
+    quality_score = (
+        audio_quality_score(raw_vector, snr_db, model.quality_baseline)
+        if model.quality_baseline
+        else 0.0
+    )
+    return AudioInferenceFeatures(
+        features=zscore_apply(result.features, model.zscore_mean, model.zscore_std),
+        duration_sec=result.duration_sec,
+        sample_rate=result.sample_rate,
+        voiced_start_sec=result.voiced_start_sec,
+        voiced_end_sec=result.voiced_end_sec,
+        estimated_snr_db=snr_db,
+        quality_score=quality_score,
+        low_quality=quality_score >= LOW_QUALITY_THRESHOLD,
+    )
+
+
+def truthy_text(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "y"}
+
+
+def format_reject_reason(row: dict[str, str]) -> str:
+    if row.get("decision") != "REJECT":
+        return ""
+    reasons = []
+    if row.get("is_replay", "").strip().lower() == "true" or row.get("split") == "replay":
+        reasons.append("回放风险样本")
+    if truthy_text(row.get("low_quality", "")):
+        reasons.append("录音质量偏低")
+    if row.get("voice_accepted") != "True":
+        reasons.append("声纹距离超过阈值")
+    elif not row.get("passphrase_score"):
+        reasons.append("未执行口令验证")
+    elif row.get("passphrase_passed") != "True":
+        reasons.append("口令DTW距离超过阈值")
+    elif row.get("fusion_passed") == "False":
+        reasons.append("融合分数超过阈值")
+    if not reasons:
+        reasons.append("判定未通过")
+    return "；".join(dict.fromkeys(reasons))
+
+
+def predict_feature_matrix(
+    features: np.ndarray,
+    model: VoiceLockModel,
+    metadata: dict[str, str] | None = None,
+    *,
+    estimated_snr_db: str = "",
+    quality_score: float = 0.0,
+    low_quality: bool = False,
+) -> dict[str, str]:
+    row = normalise_metadata_row(metadata or {})
+    dims = select_dims(model.feature_names, model.feature_set)
+    passphrase_dims = select_dims(model.feature_names, model.passphrase_feature_set)
+    speaker_features = features[:, dims]
+    passphrase_features = features[:, passphrase_dims]
+    distances = {
+        speaker: quantization_distance(speaker_features, codebook)
+        for speaker, codebook in model.codebooks.items()
+    }
+    pred = min(distances, key=distances.get)
+    distance = distances[pred]
+    threshold = model.thresholds[pred]
+    voice_score = safe_ratio(distance, threshold)
+    voice_accepted = distance <= threshold
+    voice_decision = pred if voice_accepted else "REJECT"
+    passphrase_distance = ""
+    passphrase_threshold = ""
+    passphrase_score = ""
+    passphrase_passed = ""
+    fusion_score = ""
+    fusion_threshold = ""
+    fusion_passed = ""
+    decision = voice_decision
+
+    if model.passphrase_check and voice_accepted and pred in model.passphrase_train_by_speaker:
+        passphrase_distance_value = passphrase_template_distance(
+            passphrase_features,
+            model.passphrase_train_by_speaker[pred],
+            model.passphrase_aggregate,
+            window_ratio=model.dtw_window_ratio,
+            warp_penalty=model.dtw_warp_penalty,
+        )
+        passphrase_threshold_value = model.passphrase_thresholds[pred]
+        passphrase_score_value = safe_ratio(passphrase_distance_value, passphrase_threshold_value)
+        passphrase_ok = passphrase_distance_value <= passphrase_threshold_value
+        fusion_score_value = (
+            model.fusion_voice_weight * voice_score
+            + (1.0 - model.fusion_voice_weight) * passphrase_score_value
+            + model.quality_weight * quality_score
+        )
+        fusion_ok = fusion_score_value <= model.fusion_threshold
+        passphrase_distance = f"{passphrase_distance_value:.6f}"
+        passphrase_threshold = f"{passphrase_threshold_value:.6f}"
+        passphrase_score = f"{passphrase_score_value:.6f}"
+        passphrase_passed = str(passphrase_ok)
+        fusion_score = f"{fusion_score_value:.6f}"
+        fusion_threshold = f"{model.fusion_threshold:.6f}"
+        fusion_passed = str(fusion_ok)
+        if model.decision_mode == "fusion":
+            decision = pred if passphrase_ok and fusion_ok else "REJECT"
+        else:
+            decision = pred if passphrase_ok else "REJECT"
+
+    true_speaker = row.get("speaker_id", "")
+    expected = (row.get("expected_decision") or "").strip()
+    if not expected and true_speaker:
+        expected = true_speaker if true_speaker in model.codebooks else "REJECT"
+    if expected and expected not in sorted(model.codebooks) + ["REJECT"]:
+        expected = "REJECT"
+    voice_correct = str(voice_decision == expected) if expected else ""
+    correct = str(decision == expected) if expected else ""
+    result = {
+        "file_path": row.get("file_path", ""),
+        "true_speaker": true_speaker,
+        "expected_decision": expected,
+        "pred_speaker": pred,
+        "voice_decision": voice_decision,
+        "voice_accepted": str(voice_accepted),
+        "voice_correct": voice_correct,
+        "passphrase_distance": passphrase_distance,
+        "passphrase_threshold": passphrase_threshold,
+        "passphrase_score": passphrase_score,
+        "passphrase_passed": passphrase_passed,
+        "fusion_score": fusion_score,
+        "fusion_threshold": fusion_threshold,
+        "fusion_passed": fusion_passed,
+        "decision": decision,
+        "accepted": str(decision != "REJECT"),
+        "correct": correct,
+        "environment": row.get("environment", ""),
+        "split": row.get("split", ""),
+        "device": row.get("device", ""),
+        "recording_distance": row.get("distance", ""),
+        "trial_type": row.get("trial_type", ""),
+        "is_replay": row.get("is_replay", ""),
+        "distance": f"{distance:.6f}",
+        "threshold": f"{threshold:.6f}",
+        "voice_score": f"{voice_score:.6f}",
+        "estimated_snr_db": estimated_snr_db,
+        "quality_score": f"{quality_score:.6f}",
+        "low_quality": str(low_quality),
+    }
+    result["reject_reason"] = format_reject_reason(result)
+    return result
+
+
+def predict_one(
+    wav_path: str | Path,
+    model: VoiceLockModel | None = None,
+    *,
+    model_path: str | Path = "models/lbg_vq_codebooks.npz",
+    features_path: str | Path = "data/features/srdp_features.npz",
+    metadata: dict[str, str] | None = None,
+) -> dict[str, str]:
+    model = model or load_model(model_path, features_path)
+    extracted = extract_one_audio_features(wav_path, model)
+    row = normalise_metadata_row(metadata or {})
+    row["file_path"] = row.get("file_path") or display_path(project_path(wav_path))
+    return predict_feature_matrix(
+        extracted.features,
+        model,
+        row,
+        estimated_snr_db=f"{extracted.estimated_snr_db:.6f}",
+        quality_score=extracted.quality_score,
+        low_quality=extracted.low_quality,
+    )
 
 
 def cmd_record(args: argparse.Namespace) -> None:
@@ -575,6 +890,10 @@ def cmd_record(args: argparse.Namespace) -> None:
                 "split": "train" if idx <= args.train_count else "test",
                 "expected_decision": args.expected_decision or args.speaker,
                 "notes": args.notes,
+                "device": args.device,
+                "distance": args.distance,
+                "trial_type": args.trial_type,
+                "is_replay": str(args.is_replay),
             }
         )
     metadata_path = DEMO_AUDIO_DIR / args.metadata
@@ -597,6 +916,10 @@ def cmd_snr(args: argparse.Namespace) -> None:
                 "speaker_id": row.get("speaker_id", ""),
                 "environment": row.get("environment", ""),
                 "split": row.get("split", ""),
+                "device": row.get("device", ""),
+                "distance": row.get("distance", ""),
+                "trial_type": row.get("trial_type", ""),
+                "is_replay": row.get("is_replay", ""),
                 "duration_sec": f"{duration:.6f}",
                 "estimated_snr_db": f"{snr_db:.3f}",
                 "method": "rms_percentile_85_vs_10",
@@ -605,7 +928,16 @@ def cmd_snr(args: argparse.Namespace) -> None:
     write_rows(
         project_path(args.output),
         rows,
-        ["file_path", "speaker_id", "environment", "split", "duration_sec", "estimated_snr_db", "method"],
+        [
+            "file_path",
+            "speaker_id",
+            "environment",
+            "split",
+            *OPTIONAL_METADATA_FIELDS,
+            "duration_sec",
+            "estimated_snr_db",
+            "method",
+        ],
     )
     plot_snr_by_environment(rows, project_path(args.figure))
     print(f"Saved SNR estimates: {project_path(args.output)}")
@@ -720,6 +1052,7 @@ def cmd_features(args: argparse.Namespace) -> None:
         "environment": np.array([row.get("environment", "") for row in rows]),
         "split": np.array([row.get("split", "") for row in rows]),
         "expected_decision": np.array([row.get("expected_decision", "") for row in rows]),
+        **{field: np.array([row.get(field, "") for row in rows]) for field in OPTIONAL_METADATA_FIELDS},
         "utterance_vectors": np.vstack(vectors),
         "estimated_snr_db": np.array(snr_values, dtype=np.float32),
         "quality_score": np.array(quality_scores, dtype=np.float32),
@@ -738,6 +1071,7 @@ def cmd_features(args: argparse.Namespace) -> None:
         "speaker_id",
         "environment",
         "split",
+        *OPTIONAL_METADATA_FIELDS,
         "expected_decision",
         "frames",
         "duration_sec",
@@ -784,12 +1118,14 @@ def save_vq_results(path: Path, rows: list[dict[str, str]]) -> None:
             "correct",
             "environment",
             "split",
+            *RESULT_METADATA_FIELDS,
             "distance",
             "threshold",
             "voice_score",
             "estimated_snr_db",
             "quality_score",
             "low_quality",
+            "reject_reason",
         ],
     )
 
@@ -1020,6 +1356,26 @@ def cmd_vq(args: argparse.Namespace) -> None:
         args.dtw_window_ratio,
         args.dtw_warp_penalty,
     )
+    batch_model = VoiceLockModel(
+        feature_names=names,
+        zscore_mean=np.zeros(len(names), dtype=np.float32),
+        zscore_std=np.ones(len(names), dtype=np.float32),
+        codebooks=codebooks,
+        thresholds=thresholds,
+        passphrase_thresholds=passphrase_thresholds,
+        passphrase_train_by_speaker=passphrase_train_by_speaker,
+        feature_set=args.feature_set,
+        passphrase_feature_set=args.passphrase_feature_set,
+        passphrase_aggregate=args.passphrase_aggregate,
+        dtw_window_ratio=args.dtw_window_ratio,
+        dtw_warp_penalty=args.dtw_warp_penalty,
+        decision_mode=args.decision_mode,
+        fusion_voice_weight=args.fusion_voice_weight,
+        fusion_threshold=args.fusion_threshold,
+        quality_weight=args.quality_weight,
+        quality_baseline={},
+        passphrase_check=args.passphrase_check,
+    )
 
     eval_indices = [idx for idx, row in enumerate(rows) if row["split"] != "train"]
     if not eval_indices:
@@ -1035,91 +1391,25 @@ def cmd_vq(args: argparse.Namespace) -> None:
     for idx in eval_indices:
         row = rows[idx]
         quality_score_value = float(row.get("quality_score") or 0.0)
-        distances = {speaker: quantization_distance(sliced[idx], cb) for speaker, cb in codebooks.items()}
-        pred = min(distances, key=distances.get)
-        distance = distances[pred]
-        threshold = thresholds[pred]
-        voice_score = safe_ratio(distance, threshold)
-        voice_accepted = distance <= threshold
-        voice_decision = pred if voice_accepted else "REJECT"
-        passphrase_distance = ""
-        passphrase_threshold = ""
-        passphrase_score = ""
-        passphrase_passed = ""
-        fusion_score = ""
-        fusion_threshold = ""
-        fusion_passed = ""
-        decision = voice_decision
-        if args.passphrase_check and voice_accepted and pred in passphrase_train_by_speaker:
-            passphrase_distance_value = passphrase_template_distance(
-                passphrase_features[idx],
-                passphrase_train_by_speaker[pred],
-                args.passphrase_aggregate,
-                window_ratio=args.dtw_window_ratio,
-                warp_penalty=args.dtw_warp_penalty,
-            )
-            passphrase_threshold_value = passphrase_thresholds[pred]
-            passphrase_score_value = safe_ratio(passphrase_distance_value, passphrase_threshold_value)
-            passphrase_ok = passphrase_distance_value <= passphrase_threshold_value
-            fusion_score_value = (
-                args.fusion_voice_weight * voice_score
-                + (1.0 - args.fusion_voice_weight) * passphrase_score_value
-                + args.quality_weight * quality_score_value
-            )
-            fusion_ok = fusion_score_value <= args.fusion_threshold
-            passphrase_distance = f"{passphrase_distance_value:.6f}"
-            passphrase_threshold = f"{passphrase_threshold_value:.6f}"
-            passphrase_score = f"{passphrase_score_value:.6f}"
-            passphrase_passed = str(passphrase_ok)
-            fusion_score = f"{fusion_score_value:.6f}"
-            fusion_threshold = f"{args.fusion_threshold:.6f}"
-            fusion_passed = str(fusion_ok)
-            if args.decision_mode == "fusion":
-                decision = pred if passphrase_ok and fusion_ok else "REJECT"
-            else:
-                decision = pred if passphrase_ok else "REJECT"
-        true = row["speaker_id"] if row["speaker_id"] in codebooks else "REJECT"
-        expected = (row.get("expected_decision") or "").strip()
-        if not expected:
-            expected = true if true in codebooks else "REJECT"
-        if expected not in labels:
-            expected = "REJECT"
-        is_correct = decision == expected
-        is_voice_correct = voice_decision == expected
+        prediction = predict_feature_matrix(
+            features[idx],
+            batch_model,
+            row,
+            estimated_snr_db=row.get("estimated_snr_db", ""),
+            quality_score=quality_score_value,
+            low_quality=truthy_text(row.get("low_quality", "")),
+        )
+        expected = prediction["expected_decision"] or "REJECT"
+        decision = prediction["decision"]
+        voice_decision = prediction["voice_decision"]
+        is_correct = prediction["correct"] == "True"
+        is_voice_correct = prediction["voice_correct"] == "True"
         total += 1
         correct += int(is_correct)
         voice_correct += int(is_voice_correct)
         matrix[labels.index(expected), labels.index(decision)] += 1
         voice_matrix[labels.index(expected), labels.index(voice_decision)] += 1
-        result_rows.append(
-            {
-                "file_path": row["file_path"],
-                "true_speaker": row["speaker_id"],
-                "expected_decision": expected,
-                "pred_speaker": pred,
-                "voice_decision": voice_decision,
-                "voice_accepted": str(voice_accepted),
-                "voice_correct": str(is_voice_correct),
-                "passphrase_distance": passphrase_distance,
-                "passphrase_threshold": passphrase_threshold,
-                "passphrase_score": passphrase_score,
-                "passphrase_passed": passphrase_passed,
-                "fusion_score": fusion_score,
-                "fusion_threshold": fusion_threshold,
-                "fusion_passed": fusion_passed,
-                "decision": decision,
-                "accepted": str(decision != "REJECT"),
-                "correct": str(is_correct),
-                "environment": row["environment"],
-                "split": row["split"],
-                "distance": f"{distance:.6f}",
-                "threshold": f"{threshold:.6f}",
-                "voice_score": f"{voice_score:.6f}",
-                "estimated_snr_db": row.get("estimated_snr_db", ""),
-                "quality_score": f"{quality_score_value:.6f}",
-                "low_quality": row.get("low_quality", "False"),
-            }
-        )
+        result_rows.append(prediction)
 
     save_vq_results(project_path(args.results), result_rows)
     plot_confusion(project_path(args.figure), labels, matrix)
@@ -1148,6 +1438,7 @@ def cmd_vq(args: argparse.Namespace) -> None:
         dtw_window_ratio=np.array([args.dtw_window_ratio], dtype=np.float32),
         dtw_warp_penalty=np.array([args.dtw_warp_penalty], dtype=np.float32),
         passphrase_train_distances=passphrase_train_matrix,
+        passphrase_check=np.array([str(args.passphrase_check)]),
         decision_mode=np.array([args.decision_mode]),
         fusion_voice_weight=np.array([args.fusion_voice_weight], dtype=np.float32),
         fusion_threshold=np.array([args.fusion_threshold], dtype=np.float32),
@@ -1384,6 +1675,167 @@ def fusion_decisions(rows: list[dict[str, str]], voice_weight: float, threshold:
         else:
             decisions.append("REJECT")
     return decisions
+
+
+RECOMMENDED_CONFIG_FIELDS = [
+    "recommendation",
+    "selection_rule",
+    "feature_set",
+    "codebook_size",
+    "passphrase_feature_set",
+    "passphrase_aggregate",
+    "passphrase_threshold_mode",
+    "passphrase_threshold_factor",
+    "fusion_voice_weight",
+    "fusion_threshold",
+    "quality_weight",
+    "fusion_all_accuracy",
+    "registered_test_accuracy",
+    "wrong_passphrase_reject_rate",
+    "impostor_reject_rate",
+    "false_accept",
+    "false_reject",
+    "wrong_speaker",
+    "model_path",
+    "results_path",
+]
+
+
+def field_float(row: dict[str, str], key: str, default: float = 0.0) -> float:
+    try:
+        return float(row.get(key, "") or default)
+    except ValueError:
+        return default
+
+
+def field_int(row: dict[str, str], key: str, default: int = 0) -> int:
+    try:
+        return int(row.get(key, "") or default)
+    except ValueError:
+        return default
+
+
+def select_recommended_config(rows: list[dict[str, str]]) -> dict[str, str]:
+    if not rows:
+        raise RuntimeError("no fusion rows available for recommended config")
+    candidates = [row for row in rows if field_int(row, "false_accept") == 0]
+    if not candidates:
+        candidates = rows
+    best = sorted(
+        candidates,
+        key=lambda row: (
+            field_float(row, "fusion_all_accuracy"),
+            field_float(row, "registered_test_accuracy"),
+            -field_int(row, "false_reject", 9999),
+            -field_int(row, "wrong_speaker", 9999),
+        ),
+        reverse=True,
+    )[0]
+    result = {field: best.get(field, "") for field in RECOMMENDED_CONFIG_FIELDS}
+    result["recommendation"] = "safety_first"
+    result["selection_rule"] = (
+        "prefer false_accept=0, then max fusion_all_accuracy, "
+        "then max registered_test_accuracy, then min false_reject"
+    )
+    if not result["model_path"]:
+        result["model_path"] = infer_model_path(best.get("results_path", ""))
+    return result
+
+
+def infer_model_path(results_path: str) -> str:
+    prefix = "results/fusion_experiments/"
+    suffix = "/recognition_results.csv"
+    if results_path.startswith(prefix) and results_path.endswith(suffix):
+        tag = results_path[len(prefix) : -len(suffix)]
+        return f"models/fusion_experiments/{tag}_codebooks.npz"
+    return ""
+
+
+def write_recommended_config(path: Path, rows: list[dict[str, str]]) -> dict[str, str]:
+    recommended = select_recommended_config(rows)
+    write_rows(path, [recommended], RECOMMENDED_CONFIG_FIELDS)
+    return recommended
+
+
+def cmd_recommend_config(args: argparse.Namespace) -> None:
+    recommended = write_recommended_config(
+        project_path(args.output),
+        read_csv_rows(project_path(args.matrix)),
+    )
+    print(f"Saved recommended config: {project_path(args.output)}")
+    print(json.dumps(recommended, ensure_ascii=False, indent=2))
+
+
+def cmd_predict_one(args: argparse.Namespace) -> None:
+    metadata = {
+        "file_path": display_path(project_path(args.wav)),
+        "speaker_id": args.speaker_id,
+        "environment": args.environment,
+        "split": args.split,
+        "expected_decision": args.expected_decision,
+        "device": args.device,
+        "distance": args.distance,
+        "trial_type": args.trial_type,
+        "is_replay": str(args.is_replay),
+    }
+    result = predict_one(
+        args.wav,
+        model_path=args.model,
+        features_path=args.features,
+        metadata=metadata,
+    )
+    if args.output:
+        write_rows(project_path(args.output), [result], list(result))
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_smoke_test(args: argparse.Namespace) -> None:
+    metadata_path = project_path(args.metadata)
+    rows = read_metadata(metadata_path)
+    if not rows:
+        raise RuntimeError(f"metadata has no rows: {metadata_path}")
+    missing = [
+        row["file_path"]
+        for row in rows
+        if not project_path(row["file_path"]).exists()
+    ]
+    if missing:
+        raise RuntimeError(f"missing audio files: {len(missing)}; first={missing[0]}")
+    print(f"metadata ok: {len(rows)} rows, 0 missing audio files")
+
+    if not args.skip_pipeline:
+        command = [sys.executable, str(Path(__file__).resolve()), "pipeline", "--metadata", args.metadata]
+        print(">", " ".join(command), flush=True)
+        subprocess.run(command, cwd=PROJECT_ROOT, check=True)
+
+    required = [
+        "results/tables/snr_estimates.csv",
+        "data/features/srdp_features.npz",
+        "results/tables/feature_summary.csv",
+        "results/tables/lbg_vq_recognition_results.csv",
+        "results/tables/voice_lock_metrics.csv",
+        "models/lbg_vq_codebooks.npz",
+        "results/tables/fusion_matrix.csv",
+    ]
+    missing_outputs = [
+        path
+        for path in required
+        if not project_path(path).exists() or project_path(path).stat().st_size == 0
+    ]
+    if missing_outputs:
+        raise RuntimeError(f"missing smoke-test outputs: {', '.join(missing_outputs)}")
+
+    recommended = write_recommended_config(
+        project_path(args.recommended_summary),
+        read_csv_rows(project_path(args.fusion_matrix)),
+    )
+    if field_int(recommended, "false_accept") != 0:
+        raise RuntimeError("recommended config is not safety-first: false_accept is not 0")
+    model_path = recommended.get("model_path", "")
+    if model_path and not project_path(model_path).exists():
+        raise RuntimeError(f"recommended model does not exist: {model_path}")
+    print(f"recommended config ok: {project_path(args.recommended_summary)}")
+    print("smoke test passed")
 
 
 def cmd_experiments(args: argparse.Namespace) -> None:
@@ -1689,6 +2141,7 @@ def cmd_fusion_experiments(args: argparse.Namespace) -> None:
                                     "two_layer_false_accept": str(false_accept),
                                     "two_layer_wrong_speaker": str(wrong_speaker),
                                     **fusion_metrics,
+                                    "model_path": rel(model_path),
                                     "results_path": rel(result_path),
                                 }
                             )
@@ -1719,10 +2172,23 @@ def cmd_fusion_experiments(args: argparse.Namespace) -> None:
             "false_reject",
             "false_accept",
             "wrong_speaker",
+            "model_path",
             "results_path",
         ],
     )
+    recommended = write_recommended_config(
+        project_path(args.recommended_summary),
+        summary_rows,
+    )
     print(f"Saved fusion matrix: {project_path(args.summary)}")
+    print(f"Saved recommended config: {project_path(args.recommended_summary)}")
+    print(
+        "Recommended safety-first config: "
+        f"{recommended['feature_set']} cb{recommended['codebook_size']}, "
+        f"passphrase={recommended['passphrase_feature_set']}, "
+        f"fusion_accuracy={recommended['fusion_all_accuracy']}, "
+        f"false_accept={recommended['false_accept']}"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1740,6 +2206,10 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--metadata", default="metadata_srdp.csv")
     record.add_argument("--expected-decision", default="")
     record.add_argument("--notes", default="")
+    record.add_argument("--device", default="")
+    record.add_argument("--distance", default="")
+    record.add_argument("--trial-type", default="")
+    record.add_argument("--is-replay", action="store_true")
     record.set_defaults(func=cmd_record)
 
     snr = sub.add_parser("snr", help="estimate approximate SNR values")
@@ -1784,6 +2254,21 @@ def build_parser() -> argparse.ArgumentParser:
     vq.add_argument("--pipeline-figure", default="results/figures/two_layer_pipeline.png")
     vq.add_argument("--model", default="models/lbg_vq_codebooks.npz")
     vq.set_defaults(func=cmd_vq)
+
+    predict = sub.add_parser("predict-one", help="predict one wav with the trained model")
+    predict.add_argument("wav")
+    predict.add_argument("--model", default="models/lbg_vq_codebooks.npz")
+    predict.add_argument("--features", default="data/features/srdp_features.npz")
+    predict.add_argument("--speaker-id", default="")
+    predict.add_argument("--environment", default="")
+    predict.add_argument("--split", default="")
+    predict.add_argument("--expected-decision", default="")
+    predict.add_argument("--device", default="")
+    predict.add_argument("--distance", default="")
+    predict.add_argument("--trial-type", default="")
+    predict.add_argument("--is-replay", action="store_true")
+    predict.add_argument("--output", default="")
+    predict.set_defaults(func=cmd_predict_one)
 
     pipeline = sub.add_parser("pipeline", help="run SNR, features, and LBG-VQ")
     pipeline.add_argument("--metadata", default="data/demo_audio/metadata_srdp.csv")
@@ -1856,7 +2341,20 @@ def build_parser() -> argparse.ArgumentParser:
     fusion.add_argument("--output-dir", default="results/fusion_experiments")
     fusion.add_argument("--model-dir", default="models/fusion_experiments")
     fusion.add_argument("--summary", default="results/tables/fusion_matrix.csv")
+    fusion.add_argument("--recommended-summary", default="results/tables/recommended_config.csv")
     fusion.set_defaults(func=cmd_fusion_experiments)
+
+    recommend = sub.add_parser("recommend-config", help="write the safety-first recommended fusion config")
+    recommend.add_argument("--matrix", default="results/tables/fusion_matrix.csv")
+    recommend.add_argument("--output", default="results/tables/recommended_config.csv")
+    recommend.set_defaults(func=cmd_recommend_config)
+
+    smoke = sub.add_parser("smoke-test", help="verify metadata, pipeline outputs, and recommended config")
+    smoke.add_argument("--metadata", default="data/demo_audio/metadata_srdp.csv")
+    smoke.add_argument("--skip-pipeline", action="store_true")
+    smoke.add_argument("--fusion-matrix", default="results/tables/fusion_matrix.csv")
+    smoke.add_argument("--recommended-summary", default="results/tables/recommended_config.csv")
+    smoke.set_defaults(func=cmd_smoke_test)
 
     demo = sub.add_parser("demo", help="run the formal SRDP audio pipeline")
     demo.set_defaults(
