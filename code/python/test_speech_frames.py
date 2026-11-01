@@ -1,7 +1,10 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import soundfile as sf
@@ -10,6 +13,90 @@ import gui
 import srdp
 from speech_frames import extract_branches, mask_for_region, recording_quality, sustained_activity
 from frame_consistency_experiments import score_branches, replay_candidate
+
+
+class EnrollmentQualityTests(unittest.TestCase):
+    def setUp(self):
+        self.path = Path("enrollment.wav")
+        self.model = SimpleNamespace(feature_names=["mfcc"])
+        self.extracted = srdp.AudioInferenceFeatures(
+            features=np.ones((4, 1), dtype=np.float32), duration_sec=3.0, sample_rate=16000,
+            voiced_start_sec=.2, voiced_end_sec=1.2, estimated_snr_db=20.0,
+            quality_score=.1, low_quality=False,
+        )
+        self.diagnostics = {
+            "sustained_seconds": .8, "clip_fraction": 0.0, "isolated_bursts": 0,
+            "quality_flags": [],
+        }
+
+    def assess(self, extracted=None, diagnostics=None):
+        with patch.object(gui, "load_audio", return_value=(np.zeros(48000), 16000)), \
+             patch.object(gui, "recording_quality", return_value=self.diagnostics if diagnostics is None else diagnostics), \
+             patch.object(gui, "extract_one_audio_features", return_value=self.extracted if extracted is None else extracted):
+            return gui.assess_enrollment_take(self.path, self.model)
+
+    def test_recording_duration_includes_both_limits(self):
+        for duration, accepted in ((1.19, False), (1.2, True), (5.0, True), (5.01, False)):
+            with self.subTest(duration=duration):
+                take, features = self.assess(replace(self.extracted, duration_sec=duration))
+                self.assertEqual(take.accepted, accepted)
+                self.assertIs(features, self.extracted.features)
+                if not accepted:
+                    self.assertIn("录音总时长", take.reason)
+                    self.assertIn("重录", take.reason)
+
+    def test_sustained_sound_must_reach_point_65_seconds(self):
+        for seconds, accepted in ((.2, False), (.64, False), (.65, True)):
+            with self.subTest(seconds=seconds):
+                take, _ = self.assess(diagnostics={**self.diagnostics, "sustained_seconds": seconds})
+                self.assertEqual(take.accepted, accepted)
+                if not accepted:
+                    self.assertIn("持续有效声音", take.reason)
+                    self.assertIn("不少于0.65秒", take.reason)
+
+    def test_low_snr_is_rejected_and_ten_db_is_allowed(self):
+        for snr, accepted in ((9.99, False), (10.0, True)):
+            with self.subTest(snr=snr):
+                take, _ = self.assess(replace(self.extracted, estimated_snr_db=snr))
+                self.assertEqual(take.accepted, accepted)
+                self.assertEqual(take.estimated_snr_db, snr)
+                if not accepted:
+                    self.assertIn("估计信噪比", take.reason)
+                    self.assertIn("不低于10 dB", take.reason)
+
+    def test_quality_score_must_be_strictly_less_than_point_35(self):
+        for score, accepted in ((.349, True), (.35, False), (.36, False)):
+            with self.subTest(score=score):
+                take, _ = self.assess(replace(self.extracted, quality_score=score))
+                self.assertEqual(take.accepted, accepted)
+                self.assertEqual(take.quality_score, score)
+                if not accepted:
+                    self.assertIn("质量评分", take.reason)
+                    self.assertIn("小于0.35", take.reason)
+
+    def test_clipping_and_recording_edge_each_reject_enrollment(self):
+        for flag, reason in (("clipping", "削波"), ("recording_edge", "录音首尾")):
+            with self.subTest(flag=flag):
+                take, _ = self.assess(diagnostics={**self.diagnostics, "quality_flags": [flag]})
+                self.assertFalse(take.accepted)
+                self.assertIn(reason, take.reason)
+                self.assertIn("重录", take.reason)
+
+    def test_isolated_activity_only_adds_a_rerecord_warning(self):
+        take, _ = self.assess(diagnostics={**self.diagnostics, "quality_flags": ["isolated_activity"]})
+        self.assertTrue(take.accepted)
+        self.assertTrue(take.reason.startswith("合格；"))
+        self.assertIn("短促声音", take.reason)
+        self.assertIn("建议", take.reason)
+
+    def test_all_failed_requirements_are_reported_together(self):
+        take, _ = self.assess(
+            replace(self.extracted, duration_sec=1.0, estimated_snr_db=9.0, quality_score=.4),
+            {**self.diagnostics, "sustained_seconds": .4, "quality_flags": ["clipping", "recording_edge", "isolated_activity"]},
+        )
+        self.assertFalse(take.accepted)
+        for reason in ("录音总时长", "持续有效声音", "估计信噪比", "质量评分", "削波", "录音首尾", "短促声音"):
+            self.assertIn(reason, take.reason)
 
 
 class SpeechFrameTests(unittest.TestCase):

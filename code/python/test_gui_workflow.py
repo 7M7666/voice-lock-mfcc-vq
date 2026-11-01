@@ -24,15 +24,25 @@ class GuiWorkflowTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
         cls.app.setStyleSheet(gui.APP_QSS)
         cls.base_model = gui.load_model()
-        cls.training = [
+        original_training = [
             gui.PROJECT_ROOT / f"data/demo_audio/srdp_dataset/S01/{environment}/S01_{environment}_00{i}.wav"
             for environment, count in (("corridor", 3), ("dorm", 3), ("lab", 2))
             for i in range(1, count + 1)
         ]
-        cls.takes = [gui.assess_enrollment_take(path, cls.base_model) for path in cls.training]
         cls.saved_model = gui.build_session_enrollment_model(
-            "测试用户", cls.base_model, [features for _, features in cls.takes[:3]]
+            "测试用户", cls.base_model,
+            [gui.extract_one_audio_features(path, cls.base_model).features for path in original_training[:3]],
         )
+        cls.recordings = tempfile.TemporaryDirectory(prefix="srdp_gui_enrollment_")
+        cls.addClassCleanup(cls.recordings.cleanup)
+        cls.training = []
+        for original in original_training:
+            audio, sr = gui.load_audio(original)
+            path = Path(cls.recordings.name) / original.name
+            gui.sf.write(path, gui.np.pad(audio, (sr // 10, sr // 10)), sr, subtype="FLOAT")
+            cls.training.append(path)
+        cls.takes = [gui.assess_enrollment_take(path, cls.base_model) for path in cls.training]
+        assert all(take.accepted for take, _ in cls.takes), "registration fixtures must pass quality admission"
         cls.sample = gui.PROJECT_ROOT / gui.DEMO_SAMPLES["正常通过 S01"]["wav"]
 
     def setUp(self):
@@ -77,6 +87,8 @@ class GuiWorkflowTests(unittest.TestCase):
                 self.wait_session()
 
     def test_empty_app_starts_with_verification_and_registration_entry(self):
+        self.assertEqual(self.window.enroll_duration_spin.minimum(), 1.2)
+        self.assertEqual(self.window.enroll_duration_spin.maximum(), 5.0)
         self.assertEqual(self.window.stack.currentIndex(), 0)
         self.assertEqual(self.window.nav_buttons[0].text(), "声音验证")
         self.assertTrue(self.window.nav_buttons[0].isChecked())
@@ -105,6 +117,8 @@ class GuiWorkflowTests(unittest.TestCase):
         for sample, (take, _) in zip(report["samples"], self.takes):
             self.assertTrue(sample["audio_sha256"])
             self.assertEqual(sample["diagnostics"], take.diagnostics)
+            self.assertEqual(sample["estimated_snr_db"], take.estimated_snr_db)
+            self.assertEqual(sample["quality_score"], take.quality_score)
             self.assertIn("voice_score", sample["self_check"])
             self.assertIn("passphrase_score", sample["self_check"])
         self.assertIn("还需录音验证", self.window.temp_verify_reason_label.text())
@@ -161,7 +175,11 @@ class GuiWorkflowTests(unittest.TestCase):
         self.assertIn(warning, self.window.enroll_take_list.item(1).text())
         self.window.enroll_take_list.setCurrentRow(1)
         self.assertIn(warning, self.window.enroll_quality_label.text())
-        self.assertIn("有效活动", self.window.enroll_quality_label.text())
+        self.assertIn("持续有效声音", self.window.enroll_quality_label.text())
+        self.assertIn(f"估计信噪比：{take.estimated_snr_db:.2f} dB", self.window.enroll_quality_label.text())
+        self.assertIn(f"质量评分：{take.quality_score:.3f}", self.window.enroll_quality_label.text())
+        self.assertIn(f"估计信噪比 {take.estimated_snr_db:.2f} dB", self.window.enroll_take_list.item(1).text())
+        self.assertIn(f"质量评分 {take.quality_score:.3f}", self.window.enroll_take_list.item(1).text())
         self.window.set_audio_busy(True)
         self.assertFalse(self.window.enroll_remove_button.isEnabled())
         self.window.remove_enrollment_take()
@@ -187,6 +205,9 @@ class GuiWorkflowTests(unittest.TestCase):
         self.assertEqual(self.window.enroll_progress.value(), 0)
         self.assertEqual(self.window.enroll_record_button.text(), "录制第 1 条语音")
         self.assertIn("静音", self.window.enroll_take_list.item(0).text())
+        self.assertIn("不合格", self.window.enroll_quality_label.text())
+        self.assertIn("估计信噪比：未计算", self.window.enroll_quality_label.text())
+        self.assertIn("质量评分：未计算", self.window.enroll_quality_label.text())
         self.record_registration("新用户")
         self.window.enroll_build_button.click()
         self.wait_session()
@@ -197,6 +218,37 @@ class GuiWorkflowTests(unittest.TestCase):
         self.assertIsNone(report["samples"][0]["quality_score"])
         self.assertNotIn("self_check", report["samples"][0])
         self.assertTrue(all("self_check" in sample for sample in report["samples"][1:]))
+
+    def test_rejected_eighth_take_can_be_removed_and_rerecorded_without_counting(self):
+        self.record_registration("新用户", count=7)
+        path = self.training[-1]
+        before = path.read_bytes()
+        extracted = gui.extract_one_audio_features(path, self.base_model)
+        with patch.object(gui, "record_audio_to_temp", return_value=path), patch.object(
+            gui, "extract_one_audio_features", return_value=replace(extracted, estimated_snr_db=9.0, quality_score=.2)
+        ):
+            self.window.record_enrollment_take()
+            self.wait_session()
+        self.assertEqual(len(self.window.enrollment_takes), 8)
+        self.assertEqual(self.window.accepted_enrollment_count(), 7)
+        self.assertEqual(self.window.enroll_progress.value(), 7)
+        self.assertFalse(self.window.enroll_build_button.isEnabled())
+        self.assertTrue(self.window.enroll_record_button.isEnabled())
+        self.assertIn("不合格", self.window.enroll_take_list.item(7).text())
+        self.assertIn("不低于10 dB", self.window.enroll_take_list.item(7).text())
+        self.assertIn("估计信噪比：9.00 dB", self.window.enroll_quality_label.text())
+        self.assertIn("质量评分：0.200", self.window.enroll_quality_label.text())
+        self.window.enroll_remove_button.click()
+        self.assertEqual(len(self.window.enrollment_takes), 7)
+        self.assertEqual(self.window.enroll_progress.value(), 7)
+        self.assertEqual(path.read_bytes(), before)
+        with patch.object(gui, "record_audio_to_temp", return_value=path):
+            self.window.record_enrollment_take()
+            self.wait_session()
+        self.assertEqual(self.window.accepted_enrollment_count(), 8)
+        self.assertEqual(self.window.enroll_progress.value(), 8)
+        self.assertTrue(self.window.enroll_build_button.isEnabled())
+        self.assertFalse(self.window.enroll_record_button.isEnabled())
 
     def test_user_selection_loads_immediately_without_erasing_registration(self):
         first = self.seed_user("甲")

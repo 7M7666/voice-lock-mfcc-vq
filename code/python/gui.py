@@ -75,6 +75,11 @@ from user_cleanup import build_user_cleanup, execute_user_cleanup
 
 SAMPLE_RATE = 16000
 ENROLLMENT_REQUIRED = 8
+ENROLLMENT_MIN_DURATION_SEC = 1.2
+ENROLLMENT_MAX_DURATION_SEC = 5.0
+ENROLLMENT_MIN_SUSTAINED_SEC = 0.65
+ENROLLMENT_MIN_SNR_DB = 10.0
+ENROLLMENT_MAX_QUALITY_SCORE = 0.35
 TEMP_AUDIO_DIR = PROJECT_ROOT / "tmp" / "gui_recordings"
 APP_DATA_DIR = PROJECT_ROOT / "app_data"
 USER_MODEL_DIR = APP_DATA_DIR / "users"
@@ -457,30 +462,27 @@ def assess_enrollment_take(wav_path: Path, model) -> tuple[EnrollmentTake, np.nd
     except NoSpeechError as error:
         return EnrollmentTake(wav_path, len(raw) / sr, None, None, True, False,
             f"未计入注册：{error}。请在安静处完整说出口令后重录", diagnostics), np.empty((0, len(model.feature_names)), dtype=np.float32)
-    duration_ok = 1.2 <= extracted.duration_sec <= 5.0
-    quality_ok = not extracted.low_quality
-    snr_warning = extracted.estimated_snr_db < 10.0
-    activity_ok = "short_activity" not in diagnostics["quality_flags"]
-    accepted = duration_ok and quality_ok and activity_ok
-    if not duration_ok:
-        reason = "时长不合格，请录制1.2–5秒的完整口令"
-    elif not activity_ok:
-        reason = f"有效声音仅{diagnostics['sustained_seconds']:.2f}秒，请完整说出口令后重录"
-    elif not quality_ok:
-        reason = "录音质量偏低，请靠近麦克风并减少背景声后重录"
-    elif snr_warning:
-        reason = "SNR偏低，建议重录"
-    else:
-        reason = "合格"
-    warnings = []
+    reasons = []
+    if not ENROLLMENT_MIN_DURATION_SEC <= extracted.duration_sec <= ENROLLMENT_MAX_DURATION_SEC:
+        reasons.append(f"录音总时长{extracted.duration_sec:.2f}秒不合格，需为"
+            f"{ENROLLMENT_MIN_DURATION_SEC:g}–{ENROLLMENT_MAX_DURATION_SEC:g}秒，请重录")
+    if not diagnostics["sustained_seconds"] >= ENROLLMENT_MIN_SUSTAINED_SEC:
+        reasons.append(f"持续有效声音仅{diagnostics['sustained_seconds']:.2f}秒，需不少于"
+            f"{ENROLLMENT_MIN_SUSTAINED_SEC:g}秒，请完整说出口令后重录")
+    if not extracted.estimated_snr_db >= ENROLLMENT_MIN_SNR_DB:
+        reasons.append(f"估计信噪比{extracted.estimated_snr_db:.2f} dB偏低，需不低于"
+            f"{ENROLLMENT_MIN_SNR_DB:g} dB，请减少背景声后重录")
+    if not extracted.quality_score < ENROLLMENT_MAX_QUALITY_SCORE:
+        reasons.append(f"质量评分{extracted.quality_score:.3f}不合格，需小于"
+            f"{ENROLLMENT_MAX_QUALITY_SCORE:g}，请靠近麦克风并减少背景声后重录")
     if "clipping" in diagnostics["quality_flags"]:
-        warnings.append("声音接近满幅，建议稍远离麦克风或降低输入音量后重录")
-    if "isolated_activity" in diagnostics["quality_flags"]:
-        warnings.append("检测到与主体分离的短促声音，建议避免碰麦克风或桌面后重录")
+        reasons.append("检测到削波，声音接近满幅，请稍远离麦克风或降低输入音量后重录")
     if "recording_edge" in diagnostics["quality_flags"]:
-        warnings.append("声音接近录音首尾，建议开始后再说、说完稍停后重录")
-    if warnings:
-        reason += "；" + "；".join(warnings)
+        reasons.append("声音接近录音首尾，请开始后再说、说完稍停后重录")
+    accepted = not reasons
+    reason = "；".join(reasons) if reasons else "合格"
+    if "isolated_activity" in diagnostics["quality_flags"]:
+        reason += "；检测到与主体分离的短促声音，建议避免碰麦克风或桌面后重录"
     return (
         EnrollmentTake(
             path=wav_path,
@@ -1064,7 +1066,7 @@ class SrdpVoiceLockWindow(QMainWindow):
         self.enroll_name_input.setPlaceholderText("输入你的名字")
         self.enroll_name_input.textChanged.connect(self.update_enrollment_actions)
         self.enroll_duration_spin = QDoubleSpinBox()
-        self.enroll_duration_spin.setRange(1.0, 5.0)
+        self.enroll_duration_spin.setRange(ENROLLMENT_MIN_DURATION_SEC, ENROLLMENT_MAX_DURATION_SEC)
         self.enroll_duration_spin.setValue(3.0)
         self.enroll_record_button = QPushButton("开始录入一条注册语音")
         self.enroll_record_button.clicked.connect(self.record_enrollment_take)
@@ -1619,8 +1621,12 @@ class SrdpVoiceLockWindow(QMainWindow):
         self.enroll_take_list.clear()
         for index, take in enumerate(self.enrollment_takes, start=1):
             status = "合格" if take.accepted else "不合格"
+            snr = f"{take.estimated_snr_db:.2f} dB" if take.estimated_snr_db is not None else "未计算"
+            score = f"{take.quality_score:.3f}" if take.quality_score is not None else "未计算"
             self.enroll_take_list.addItem(
                 f"第 {index} 次｜{status}｜{take.duration_sec:.1f} 秒"
+                + f"｜估计信噪比 {snr}｜质量评分 {score}"
+                + (f"｜持续有效声音 {take.diagnostics['sustained_seconds']:.2f} 秒" if take.diagnostics else "")
                 + (f"｜{take.reason}" if take.reason != "合格" else "")
             )
         if self.enrollment_takes:
@@ -1634,9 +1640,14 @@ class SrdpVoiceLockWindow(QMainWindow):
             return
         take = self.enrollment_takes[index]
         metrics = take.diagnostics
-        text = f"第{index + 1}条：{take.reason}"
+        snr = f"{take.estimated_snr_db:.2f} dB" if take.estimated_snr_db is not None else "未计算"
+        score = f"{take.quality_score:.3f}" if take.quality_score is not None else "未计算"
+        text = f"第{index + 1}条：" + ("合格" if take.accepted else "不合格")
+        if take.reason != "合格":
+            text += f"；{take.reason}"
+        text += f"\n估计信噪比：{snr}；质量评分：{score}（越小越好）。"
         if metrics:
-            text += (f"\n有效活动约{metrics['sustained_seconds']:.2f}秒，近满幅采样{metrics['clip_fraction']:.1%}，"
+            text += (f"\n持续有效声音约{metrics['sustained_seconds']:.2f}秒，近满幅采样{metrics['clip_fraction']:.1%}，"
                 f"孤立短促声音{metrics['isolated_bursts']}处。能量检测不能判断口令内容。")
         self.enroll_quality_label.setText(text)
         self.enroll_remove_button.setEnabled(not self.audio_busy)
