@@ -1,6 +1,8 @@
 code/python/venv/
 **/__pycache__/
 *.pyc
+app_data/
+results/gui_history/
 
 *.tmp
 *.tmp.mlapp

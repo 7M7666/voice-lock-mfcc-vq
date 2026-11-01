@@ -1,0 +1,4 @@
+﻿variant,weight,threshold,calibration_false_accept,calibration_false_reject,voice_guard,passphrase_guard
+strict,0.3,0.8505720249706826,0,20,1.0,1.0
+voice_complement,0.3,0.8505720249706826,0,20,1.1,1.0
+both_complement,0.3,0.8505720249706826,0,20,1.1,1.1

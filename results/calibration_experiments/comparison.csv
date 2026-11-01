@@ -1,0 +1,8 @@
+﻿variant,fusion_all_accuracy,registered_test_accuracy,wrong_passphrase_reject_rate,impostor_reject_rate,false_reject,false_accept,wrong_speaker,mean_prediction_ms,decision_mode,fusion_voice_weight,fusion_threshold,voice_metric,model_path
+converged_in_sample,0.825397,0.541667,1.000000,1.000000,11,0,0,120.35,two_layer,0.5,1.0,absolute,results/calibration_experiments/converged_in_sample/model.npz
+loo_voice,0.936508,0.875000,0.972222,1.000000,3,1,0,337.10,two_layer,0.5,1.0,absolute,results/calibration_experiments/loo_voice/model.npz
+loo_two_layer,0.888889,0.958333,0.861111,0.666667,0,6,1,336.24,two_layer,0.5,1.0,absolute,results/calibration_experiments/loo_two_layer/model.npz
+loo_fusion,0.730159,0.291667,1.000000,1.000000,17,0,0,335.82,fusion,0.7,0.7596789987453424,absolute,results/calibration_experiments/loo_fusion/model.npz
+loo_voice_fusion,0.825397,0.541667,1.000000,1.000000,11,0,0,336.25,fusion,0.3,0.8543561419841142,absolute,results/calibration_experiments/loo_voice_fusion/model.npz
+cohort_two_layer,0.936508,0.875000,0.972222,1.000000,3,1,0,406.47,two_layer,0.5,1.0,cohort_ratio,results/calibration_experiments/cohort_two_layer/model.npz
+cohort_fusion,0.936508,0.875000,0.972222,1.000000,3,1,0,407.03,fusion,0.5,1.0,cohort_ratio,results/calibration_experiments/cohort_fusion/model.npz

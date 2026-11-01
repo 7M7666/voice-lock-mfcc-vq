@@ -1,0 +1,21 @@
+{
+  "runtime_versions": {
+    "python": "3.11.9",
+    "numpy": "2.4.4",
+    "librosa": "0.11.0",
+    "numba": "0.65.1"
+  },
+  "source_sha256": {
+    "srdp.py": "9cbcae9edd2470000c7f870c56b8f91354d78abfe0dfeea828aecebab62a52cc",
+    "dtw_paths.py": "c97d3cb29ec449844b73566f9a289871391053029b5ceb0382bec0de79544307",
+    "algorithm_followup.py": "8d0a9ba268c4f284c3d51d549382a71c811b7b4504ea952361861bfade09cfea"
+  },
+  "evaluation_status": "development comparisons on historically reused 63 recordings, not independent validation",
+  "calibration": "36 training recordings only; leave one complete recording out; refit global z-score every fold; voice mean+2std; phrase mean+1std",
+  "fusion_negatives": "108 other-registered-user claims, all saying correct phrase; no genuine-user wrong-phrase calibration recordings",
+  "fusion_guards": "predeclared (1,1), (1.1,1), (1.1,1.1); fit weights/thresholds only on training calibration scores; no default deployment",
+  "preprocessing": "frame energy + spectral flatness VAD, not WebRTC; 25ms frames/10ms hop, flatness<0.35, RMS>=max(1e-5,0.1*peak), >=0.20s voiced, 60ms outer padding, internal pauses preserved",
+  "normalization": "utterance CMN/CMVN on 12 static MFCCs, recompute deltas, retain other 7 features, then training-only z-score",
+  "timing": "warm DTW JIT before measurement; scoring excludes extraction; audio_stress measures WAV loading + extraction + scoring",
+  "limitations": "synthetic noise/gain are stress tests, not new people/devices; calibration fitting statistics are not held-out performance; no real microphone acceptance claim"
+}

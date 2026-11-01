@@ -5,7 +5,8 @@ import csv
 import json
 import subprocess
 import sys
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import librosa
@@ -134,6 +135,64 @@ class VoiceLockModel:
     quality_weight: float
     quality_baseline: dict[str, float]
     passphrase_check: bool = True
+    calibration_mode: str = "legacy"
+    voice_metric: str = "absolute"
+    vad_mode: str = "trim"
+    cepstral_normalization: str = "none"
+    dtw_max_run: int = 0
+    voice_guard: float = 1.0
+    passphrase_guard: float = 1.0
+
+
+class NoSpeechError(ValueError):
+    pass
+
+
+def speech_region(y: np.ndarray, sr: int, mode: str = "trim") -> tuple[np.ndarray, int, int]:
+    if y.size == 0 or not np.isfinite(y).all():
+        raise NoSpeechError("录音为空或包含无效采样")
+    centered = y.astype(np.float64) - float(np.mean(y))
+    if float(np.sqrt(np.mean(centered ** 2))) < 1e-5:
+        raise NoSpeechError("录音静音或音量过低")
+    if y.size < WIN_LENGTH:
+        raise NoSpeechError("有效语音过短")
+    activity_frames = librosa.util.frame(centered, frame_length=WIN_LENGTH, hop_length=HOP_LENGTH)
+    activity_rms = np.sqrt(np.mean(activity_frames ** 2, axis=0))
+    floor, peak = np.percentile(activity_rms, [20, 95])
+    if peak < 3.0 * max(float(floor), 1e-5):
+        raise NoSpeechError("录音能量起伏不足，未检测到明确的口令语音活动")
+    if mode == "trim":
+        return trim_silence(pre_emphasize(y), sr)
+    if mode != "frame":
+        raise ValueError(f"unknown VAD mode: {mode}")
+    frames = librosa.util.frame(y, frame_length=WIN_LENGTH, hop_length=HOP_LENGTH)
+    rms = np.sqrt(np.mean(frames ** 2, axis=0))
+    spectrum = np.abs(np.fft.rfft(frames * np.hanning(WIN_LENGTH)[:, None], axis=0)) ** 2 + 1e-12
+    flatness = np.exp(np.mean(np.log(spectrum), axis=0)) / np.mean(spectrum, axis=0)
+    voiced = (rms >= max(1e-5, 0.1 * float(np.max(rms)))) & (flatness < 0.35)
+    if np.count_nonzero(voiced) * HOP_LENGTH / sr < 0.20:
+        raise NoSpeechError("未检测到足够的有效语音（至少0.20秒）")
+    # Keep internal pauses continuous for DTW instead of joining separate sounds.
+    indices = np.flatnonzero(voiced)
+    start = max(0, int(indices[0] * HOP_LENGTH) - int(0.06 * sr))
+    end = min(len(y), int(indices[-1] * HOP_LENGTH + WIN_LENGTH) + int(0.06 * sr))
+    return pre_emphasize(y)[start:end], start, end
+
+
+def normalize_cepstra(features: np.ndarray, mode: str = "none") -> np.ndarray:
+    if mode == "none":
+        return features
+    if mode not in {"cmn", "cmvn"}:
+        raise ValueError(f"unknown cepstral normalization: {mode}")
+    result = features.copy()
+    cepstra = result[:, :12]
+    cepstra -= cepstra.mean(axis=0)
+    if mode == "cmvn":
+        scale = cepstra.std(axis=0)
+        scale[scale < 1e-8] = 1.0
+        cepstra /= scale
+    result[:, 12:24] = librosa.feature.delta(cepstra.T).T
+    return result
 
 
 def ensure_dirs() -> None:
@@ -257,12 +316,18 @@ def spectral_entropy(y: np.ndarray) -> np.ndarray:
     return entropy / np.log2(power.shape[0])
 
 
-def extract_one(audio_path: Path) -> AudioFeature:
+def extract_one(audio_path: Path, *, vad_mode: str = "trim", cepstral_normalization: str = "none") -> AudioFeature:
     y_raw, sr = load_audio(audio_path)
-    y_pre = pre_emphasize(y_raw)
-    y_voice, start, end = trim_silence(y_pre, sr)
-    if y_voice.size < WIN_LENGTH:
-        raise ValueError(f"voiced segment is too short: {audio_path}")
+    if y_raw.size < WIN_LENGTH:
+        raise NoSpeechError(f"录音过短: {audio_path}")
+    _, start, end = speech_region(y_raw, sr, vad_mode)
+    return extract_audio_region(y_raw, sr, start, end, cepstral_normalization=cepstral_normalization)
+
+
+def extract_audio_region(y_raw: np.ndarray, sr: int, start: int, end: int, *, cepstral_normalization: str = "none") -> AudioFeature:
+    y_voice = pre_emphasize(y_raw)[start:end]
+    if y_voice.size < max(WIN_LENGTH, 8 * HOP_LENGTH):
+        raise NoSpeechError("有效语音过短")
 
     mfcc = librosa.feature.mfcc(
         y=y_voice,
@@ -315,7 +380,7 @@ def extract_one(audio_path: Path) -> AudioFeature:
         ]
     )
     return AudioFeature(
-        features=stacked.T.astype(np.float32),
+        features=normalize_cepstra(stacked.T.astype(np.float32), cepstral_normalization),
         duration_sec=float(len(y_raw) / sr),
         sample_rate=sr,
         voiced_start_sec=float(start / sr),
@@ -402,7 +467,7 @@ def lloyd_refine(x: np.ndarray, centers: np.ndarray, max_iter: int, tol: float) 
             if members.size:
                 new_centers[idx] = members.mean(axis=0)
         distortion = float(np.mean(np.min(distances, axis=1)))
-        if abs(last_distortion - distortion) <= tol * max(last_distortion, 1.0):
+        if np.isfinite(last_distortion) and abs(last_distortion - distortion) <= tol * max(last_distortion, 1.0):
             return new_centers.astype(np.float32)
         centers = new_centers
         last_distortion = distortion
@@ -437,51 +502,27 @@ def quantization_distance(x: np.ndarray, codebook: np.ndarray) -> float:
     return float(np.mean(np.min(distances, axis=1)))
 
 
+def speaker_distance_scores(distances: dict[str, float], metric: str = "absolute") -> dict[str, float]:
+    if metric == "absolute":
+        return dict(distances)
+    if metric != "cohort_ratio" or len(distances) < 2:
+        raise ValueError("cohort_ratio scoring requires at least two user codebooks")
+    return {
+        speaker: distance / max(min(value for other, value in distances.items() if other != speaker), 1e-6)
+        for speaker, distance in distances.items()
+    }
+
+
 def dtw_distance(
     x: np.ndarray,
     y: np.ndarray,
     *,
     window_ratio: float = 1.0,
     warp_penalty: float = 0.0,
+    max_run: int = 0,
 ) -> float:
-    if x.size == 0 or y.size == 0:
-        return float("inf")
-    n, m = x.shape[0], y.shape[0]
-    constrained = 0 < window_ratio < 1.0
-    band = max(abs(n - m), int(round(max(n, m) * window_ratio))) if constrained else m
-    prev = np.full(m + 1, np.inf, dtype=np.float64)
-    curr = np.full(m + 1, np.inf, dtype=np.float64)
-    prev_steps = np.zeros(m + 1, dtype=np.int32)
-    curr_steps = np.zeros(m + 1, dtype=np.int32)
-    prev[0] = 0.0
-    for i in range(1, n + 1):
-        curr.fill(np.inf)
-        curr_steps.fill(0)
-        frame_costs = np.linalg.norm(y - x[i - 1], axis=1)
-        if constrained:
-            center = int(round(i * m / n))
-            start = max(1, center - band)
-            end = min(m, center + band)
-        else:
-            start, end = 1, m
-        for j in range(start, end + 1):
-            options = (
-                prev[j] + warp_penalty,
-                curr[j - 1] + warp_penalty,
-                prev[j - 1],
-            )
-            choice = int(np.argmin(options))
-            if choice == 0:
-                best_cost, best_steps = options[0], prev_steps[j]
-            elif choice == 1:
-                best_cost, best_steps = options[1], curr_steps[j - 1]
-            else:
-                best_cost, best_steps = options[2], prev_steps[j - 1]
-            curr[j] = best_cost + float(frame_costs[j - 1])
-            curr_steps[j] = best_steps + 1
-        prev, curr = curr, prev
-        prev_steps, curr_steps = curr_steps, prev_steps
-    return float(prev[m] / max(int(prev_steps[m]), 1))
+    from dtw_paths import alignment
+    return alignment(x, y, window_ratio=window_ratio, warp_penalty=warp_penalty, max_run=max_run)[0]
 
 
 def train_threshold(
@@ -500,6 +541,84 @@ def train_threshold(
 
 def safe_ratio(value: float, threshold: float) -> float:
     return float(value / threshold) if threshold > 0 else float("inf")
+
+
+def verification_decision(
+    voice_score: float, passphrase_score: float, mode: str, voice_weight: float,
+    fusion_threshold: float, quality_score: float = 0.0, quality_weight: float = 0.0,
+    voice_guard: float = 1.0, passphrase_guard: float = 1.0,
+) -> tuple[bool, float]:
+    fusion_score = voice_weight * voice_score + (1.0 - voice_weight) * passphrase_score + quality_weight * quality_score
+    if mode == "bounded_fusion":
+        accepted = voice_score <= voice_guard and passphrase_score <= passphrase_guard
+    else:
+        accepted = voice_score <= 1.0 and passphrase_score <= 1.0
+    if mode in {"fusion", "bounded_fusion"}:
+        accepted = accepted and fusion_score <= fusion_threshold
+    return accepted, fusion_score
+
+
+def leave_one_out_voice_distances(
+    recordings: list[np.ndarray], codebook_size: int = 16, epsilon: float = 0.01,
+) -> list[float]:
+    if len(recordings) < 3:
+        raise ValueError("leave-one-recording-out calibration requires at least 3 recordings per user")
+    distances = []
+    for held, recording in enumerate(recordings):
+        codebook = lbg_codebook(
+            np.vstack([matrix for index, matrix in enumerate(recordings) if index != held]),
+            target_size=codebook_size, epsilon=epsilon,
+        )
+        distances.append(quantization_distance(recording, codebook))
+    return distances
+
+
+def calibration_threshold(distances: list[float], std_factor: float = 2.0) -> float:
+    values = np.asarray(distances, dtype=np.float64)
+    if values.size < 3 or not np.isfinite(values).all():
+        raise ValueError("calibration requires at least 3 finite held-out distances")
+    return float(max(values.mean() + std_factor * values.std(), 1e-6))
+
+
+def collect_calibration_trials(
+    names: list[str], rows: list[dict[str, str]], features: list[np.ndarray], *,
+    codebook_size: int = 16, feature_set: str = "mfcc", passphrase_feature_set: str = "all",
+    epsilon: float = 0.01, aggregate: str = "min", window_ratio: float = 1.0,
+    warp_penalty: float = 0.0, verbose: bool = False,
+) -> list[dict]:
+    train = [(row, matrix) for row, matrix in zip(rows, features) if row["split"] == "train"]
+    speakers = sorted({row["speaker_id"] for row, _ in train})
+    if len(speakers) < 2 or any(sum(row["speaker_id"] == speaker for row, _ in train) < 3 for speaker in speakers):
+        raise ValueError("calibration requires at least 2 training users and 3 recordings per user")
+    dims = select_dims(names, feature_set)
+    phrase_dims = select_dims(names, passphrase_feature_set)
+    trials = []
+    for held, (held_row, held_matrix) in enumerate(train):
+        mean, std = zscore_fit([matrix for index, (_, matrix) in enumerate(train) if index != held])
+        sample = zscore_apply(held_matrix, mean, std)
+        grouped = {speaker: [] for speaker in speakers}
+        for index, (row, matrix) in enumerate(train):
+            if index != held:
+                grouped[row["speaker_id"]].append(zscore_apply(matrix, mean, std))
+        for speaker, recordings in grouped.items():
+            codebook = lbg_codebook(np.vstack([matrix[:, dims] for matrix in recordings]), codebook_size, epsilon)
+            trials.append({
+                "file_path": held_row["file_path"],
+                "true_speaker": held_row["speaker_id"],
+                "claim_speaker": speaker,
+                "genuine": held_row["speaker_id"] == speaker,
+                "voice_distance": quantization_distance(sample[:, dims], codebook),
+                "passphrase_distance": passphrase_template_distance(
+                    sample[:, phrase_dims], [matrix[:, phrase_dims] for matrix in recordings], aggregate,
+                    window_ratio=window_ratio, warp_penalty=warp_penalty,
+                ),
+            })
+        cohort = speaker_distance_scores({trial["claim_speaker"]: trial["voice_distance"] for trial in trials[-len(speakers):]}, "cohort_ratio")
+        for trial in trials[-len(speakers):]:
+            trial["cohort_distance"] = cohort[trial["claim_speaker"]]
+        if verbose and (held + 1) % 6 == 0:
+            print(f"Calibration: {held + 1}/{len(train)} held-out recordings", flush=True)
+    return trials
 
 
 def aggregate_distances(distances: list[float], mode: str) -> float:
@@ -527,6 +646,7 @@ def passphrase_template_distance(
     exclude_index: int | None = None,
     window_ratio: float = 1.0,
     warp_penalty: float = 0.0,
+    max_run: int = 0,
 ) -> float:
     distances = [
         dtw_distance(
@@ -534,6 +654,7 @@ def passphrase_template_distance(
             template,
             window_ratio=window_ratio,
             warp_penalty=warp_penalty,
+            max_run=max_run,
         )
         for idx, template in enumerate(templates)
         if idx != exclude_index
@@ -648,49 +769,58 @@ def load_model(
     model_path: str | Path = "models/lbg_vq_codebooks.npz",
     features_path: str | Path = "data/features/srdp_features.npz",
 ) -> VoiceLockModel:
-    model_data = np.load(project_path(model_path), allow_pickle=False)
-    feature_data = np.load(project_path(features_path), allow_pickle=False)
-    names, rows, features = load_feature_archive(project_path(features_path))
-    speakers = [str(speaker) for speaker in model_data["speakers"]]
-    feature_set = archive_string(model_data, "feature_set", "mfcc")
-    passphrase_feature_set = archive_string(model_data, "passphrase_feature_set", "mfcc")
-    passphrase_dims = select_dims(names, passphrase_feature_set)
-    passphrase_train_by_speaker = {speaker: [] for speaker in speakers}
-    for row, feat in zip(rows, features):
-        speaker = row["speaker_id"]
-        if row["split"] == "train" and speaker in passphrase_train_by_speaker:
-            passphrase_train_by_speaker[speaker].append(feat[:, passphrase_dims])
-    return VoiceLockModel(
-        feature_names=names,
-        zscore_mean=feature_data["zscore_mean"].astype(np.float32),
-        zscore_std=feature_data["zscore_std"].astype(np.float32),
-        codebooks={speaker: model_data[f"codebook_{speaker}"] for speaker in speakers},
-        thresholds={
-            speaker: float(value)
-            for speaker, value in zip(speakers, model_data["thresholds"])
-        },
-        passphrase_thresholds={
-            speaker: float(value)
-            for speaker, value in zip(speakers, model_data["passphrase_thresholds"])
-        },
-        passphrase_train_by_speaker=passphrase_train_by_speaker,
-        feature_set=feature_set,
-        passphrase_feature_set=passphrase_feature_set,
-        passphrase_aggregate=archive_string(model_data, "passphrase_aggregate", "min"),
-        dtw_window_ratio=archive_float(model_data, "dtw_window_ratio", 1.0),
-        dtw_warp_penalty=archive_float(model_data, "dtw_warp_penalty", 0.0),
-        decision_mode=archive_string(model_data, "decision_mode", "two_layer"),
-        fusion_voice_weight=archive_float(model_data, "fusion_voice_weight", 0.5),
-        fusion_threshold=archive_float(model_data, "fusion_threshold", 1.0),
-        quality_weight=archive_float(model_data, "quality_weight", 0.0),
-        quality_baseline=load_quality_baseline(feature_data),
-        passphrase_check=archive_bool(model_data, "passphrase_check", True),
-    )
+    with np.load(project_path(model_path), allow_pickle=False) as model_data:
+        speakers = [str(speaker) for speaker in model_data["speakers"]]
+        feature_set = archive_string(model_data, "feature_set", "mfcc")
+        passphrase_feature_set = archive_string(model_data, "passphrase_feature_set", "mfcc")
+        if "phrase_template_counts" in model_data.files:
+            names = model_data["all_feature_names"].tolist()
+            mean, std = model_data["zscore_mean"], model_data["zscore_std"]
+            quality_baseline = load_quality_baseline(model_data)
+            passphrase_train_by_speaker = {
+                speaker: [model_data[f"phrase_{speaker}_{index}"] for index in range(int(count))]
+                for speaker, count in zip(speakers, model_data["phrase_template_counts"])
+            }
+        else:
+            with np.load(project_path(features_path), allow_pickle=False) as feature_data:
+                mean, std = feature_data["zscore_mean"], feature_data["zscore_std"]
+                quality_baseline = load_quality_baseline(feature_data)
+            names, rows, features = load_feature_archive(project_path(features_path))
+            passphrase_dims = select_dims(names, passphrase_feature_set)
+            passphrase_train_by_speaker = {speaker: [] for speaker in speakers}
+            for row, feat in zip(rows, features):
+                speaker = row["speaker_id"]
+                if row["split"] == "train" and speaker in passphrase_train_by_speaker:
+                    passphrase_train_by_speaker[speaker].append(feat[:, passphrase_dims])
+        return VoiceLockModel(
+            feature_names=names, zscore_mean=mean, zscore_std=std,
+            codebooks={speaker: model_data[f"codebook_{speaker}"] for speaker in speakers},
+            thresholds={speaker: float(value) for speaker, value in zip(speakers, model_data["thresholds"])},
+            passphrase_thresholds={speaker: float(value) for speaker, value in zip(speakers, model_data["passphrase_thresholds"])},
+            passphrase_train_by_speaker=passphrase_train_by_speaker,
+            feature_set=feature_set, passphrase_feature_set=passphrase_feature_set,
+            passphrase_aggregate=archive_string(model_data, "passphrase_aggregate", "min"),
+            dtw_window_ratio=archive_float(model_data, "dtw_window_ratio", 1.0),
+            dtw_warp_penalty=archive_float(model_data, "dtw_warp_penalty", 0.0),
+            decision_mode=archive_string(model_data, "decision_mode", "two_layer"),
+            fusion_voice_weight=archive_float(model_data, "fusion_voice_weight", 0.5),
+            fusion_threshold=archive_float(model_data, "fusion_threshold", 1.0),
+            quality_weight=archive_float(model_data, "quality_weight", 0.0),
+            quality_baseline=quality_baseline,
+            passphrase_check=archive_bool(model_data, "passphrase_check", True),
+            calibration_mode=archive_string(model_data, "calibration_mode", "legacy"),
+            voice_metric=archive_string(model_data, "voice_metric", "absolute"),
+            vad_mode=archive_string(model_data, "vad_mode", "trim"),
+            cepstral_normalization=archive_string(model_data, "cepstral_normalization", "none"),
+            dtw_max_run=int(archive_float(model_data, "dtw_max_run", 0)),
+            voice_guard=archive_float(model_data, "voice_guard", 1.0),
+            passphrase_guard=archive_float(model_data, "passphrase_guard", 1.0),
+        )
 
 
 def extract_one_audio_features(audio_path: str | Path, model: VoiceLockModel) -> AudioInferenceFeatures:
     audio_path = project_path(audio_path)
-    result = extract_one(audio_path)
+    result = extract_one(audio_path, vad_mode=model.vad_mode, cepstral_normalization=model.cepstral_normalization)
     snr_db, _ = estimate_snr_db(audio_path)
     raw_vector = result.features.mean(axis=0).astype(np.float32)
     quality_score = (
@@ -724,10 +854,10 @@ def format_reject_reason(row: dict[str, str]) -> str:
         reasons.append("录音质量偏低")
     if row.get("voice_accepted") != "True":
         reasons.append("声纹距离超过阈值")
-    elif not row.get("passphrase_score"):
+    if not row.get("passphrase_score"):
         reasons.append("未执行口令验证")
     elif row.get("passphrase_passed") != "True":
-        reasons.append("口令DTW距离超过阈值")
+        reasons.append("口令模板DTW距离超过阈值")
     elif row.get("fusion_passed") == "False":
         reasons.append("融合分数超过阈值")
     if not reasons:
@@ -743,6 +873,7 @@ def predict_feature_matrix(
     estimated_snr_db: str = "",
     quality_score: float = 0.0,
     low_quality: bool = False,
+    score_all_branches: bool = False,
 ) -> dict[str, str]:
     row = normalise_metadata_row(metadata or {})
     dims = select_dims(model.feature_names, model.feature_set)
@@ -754,7 +885,7 @@ def predict_feature_matrix(
         for speaker, codebook in model.codebooks.items()
     }
     pred = min(distances, key=distances.get)
-    distance = distances[pred]
+    distance = speaker_distance_scores(distances, model.voice_metric)[pred]
     threshold = model.thresholds[pred]
     voice_score = safe_ratio(distance, threshold)
     voice_accepted = distance <= threshold
@@ -768,21 +899,22 @@ def predict_feature_matrix(
     fusion_passed = ""
     decision = voice_decision
 
-    if model.passphrase_check and voice_accepted and pred in model.passphrase_train_by_speaker:
+    if model.passphrase_check and (voice_accepted or score_all_branches or model.decision_mode == "bounded_fusion") and pred in model.passphrase_train_by_speaker:
         passphrase_distance_value = passphrase_template_distance(
             passphrase_features,
             model.passphrase_train_by_speaker[pred],
             model.passphrase_aggregate,
             window_ratio=model.dtw_window_ratio,
             warp_penalty=model.dtw_warp_penalty,
+            max_run=model.dtw_max_run,
         )
         passphrase_threshold_value = model.passphrase_thresholds[pred]
         passphrase_score_value = safe_ratio(passphrase_distance_value, passphrase_threshold_value)
         passphrase_ok = passphrase_distance_value <= passphrase_threshold_value
-        fusion_score_value = (
-            model.fusion_voice_weight * voice_score
-            + (1.0 - model.fusion_voice_weight) * passphrase_score_value
-            + model.quality_weight * quality_score
+        accepted, fusion_score_value = verification_decision(
+            voice_score, passphrase_score_value, model.decision_mode, model.fusion_voice_weight,
+            model.fusion_threshold, quality_score, model.quality_weight,
+            model.voice_guard, model.passphrase_guard,
         )
         fusion_ok = fusion_score_value <= model.fusion_threshold
         passphrase_distance = f"{passphrase_distance_value:.6f}"
@@ -792,10 +924,7 @@ def predict_feature_matrix(
         fusion_score = f"{fusion_score_value:.6f}"
         fusion_threshold = f"{model.fusion_threshold:.6f}"
         fusion_passed = str(fusion_ok)
-        if model.decision_mode == "fusion":
-            decision = pred if passphrase_ok and fusion_ok else "REJECT"
-        else:
-            decision = pred if passphrase_ok else "REJECT"
+        decision = pred if accepted else "REJECT"
 
     true_speaker = row.get("speaker_id", "")
     expected = (row.get("expected_decision") or "").strip()
@@ -832,6 +961,8 @@ def predict_feature_matrix(
         "distance": f"{distance:.6f}",
         "threshold": f"{threshold:.6f}",
         "voice_score": f"{voice_score:.6f}",
+        "raw_voice_distance": f"{distances[pred]:.6f}",
+        "voice_metric": model.voice_metric,
         "estimated_snr_db": estimated_snr_db,
         "quality_score": f"{quality_score:.6f}",
         "low_quality": str(low_quality),
@@ -849,9 +980,12 @@ def predict_one(
     metadata: dict[str, str] | None = None,
 ) -> dict[str, str]:
     model = model or load_model(model_path, features_path)
-    extracted = extract_one_audio_features(wav_path, model)
     row = normalise_metadata_row(metadata or {})
     row["file_path"] = row.get("file_path") or display_path(project_path(wav_path))
+    try:
+        extracted = extract_one_audio_features(wav_path, model)
+    except NoSpeechError as error:
+        return no_speech_result(row, str(error))
     return predict_feature_matrix(
         extracted.features,
         model,
@@ -860,6 +994,26 @@ def predict_one(
         quality_score=extracted.quality_score,
         low_quality=extracted.low_quality,
     )
+
+
+def no_speech_result(row: dict[str, str], reason: str) -> dict[str, str]:
+    result = {key: "" for key in (
+        "pred_speaker", "voice_score", "passphrase_score", "fusion_score", "fusion_threshold",
+        "estimated_snr_db", "quality_score", "distance", "threshold", "passphrase_distance",
+        "passphrase_threshold", "raw_voice_distance", "voice_metric", "fusion_passed",
+    )}
+    expected = row.get("expected_decision", "")
+    result.update(
+        file_path=row.get("file_path", ""), true_speaker=row.get("speaker_id", ""),
+        expected_decision=expected, decision="REJECT", accepted="False", voice_decision="REJECT",
+        voice_accepted="False", voice_passed="False", passphrase_passed="False", low_quality="True",
+        correct=str(expected == "REJECT") if expected else "",
+        voice_correct=str(expected == "REJECT") if expected else "", reject_reason=reason,
+        environment=row.get("environment", ""), split=row.get("split", ""),
+        device=row.get("device", ""), recording_distance=row.get("distance", ""),
+        trial_type=row.get("trial_type", ""), is_replay=row.get("is_replay", ""),
+    )
+    return result
 
 
 def cmd_record(args: argparse.Namespace) -> None:
@@ -1122,6 +1276,8 @@ def save_vq_results(path: Path, rows: list[dict[str, str]]) -> None:
             "distance",
             "threshold",
             "voice_score",
+            "raw_voice_distance",
+            "voice_metric",
             "estimated_snr_db",
             "quality_score",
             "low_quality",
@@ -1677,6 +1833,38 @@ def fusion_decisions(rows: list[dict[str, str]], voice_weight: float, threshold:
     return decisions
 
 
+def fit_score_fusion(trials: list[dict], weights: tuple[float, ...] = (0.3, 0.5, 0.7)) -> dict:
+    genuine = np.array([row["genuine"] for row in trials], dtype=bool)
+    if not genuine.any() or genuine.all():
+        raise ValueError("fusion calibration requires both genuine and impostor trials")
+    voice = np.array([float(row["voice_score"]) for row in trials])
+    phrase = np.array([float(row["passphrase_score"]) for row in trials])
+    if not np.isfinite(voice).all() or not np.isfinite(phrase).all():
+        raise ValueError("fusion calibration scores must be finite")
+    gates = (voice <= 1.0) & (phrase <= 1.0)
+    best = None
+    for weight in weights:
+        scores = weight * voice + (1.0 - weight) * phrase
+        boundaries = sorted({0.0, 1.0, *(float(value) for value in scores[gates])})
+        candidates = [0.0, 1.0] + [(left + right) / 2.0 for left, right in zip(boundaries, boundaries[1:])]
+        for threshold in candidates:
+            accepted = gates & (scores <= threshold)
+            false_accept = int(np.sum(accepted & ~genuine))
+            false_reject = int(np.sum(~accepted & genuine))
+            rank = (false_accept, false_reject, abs(weight - 0.5), -threshold)
+            if best is None or rank < best[0]:
+                best = (rank, {
+                    "fusion_voice_weight": weight,
+                    "fusion_threshold": threshold,
+                    "calibration_false_accept": false_accept,
+                    "calibration_false_reject": false_reject,
+                    "calibration_genuine_trials": int(genuine.sum()),
+                    "calibration_impostor_trials": int((~genuine).sum()),
+                    "changed_from_two_layer": int(np.sum(accepted != gates)),
+                })
+    return best[1]
+
+
 RECOMMENDED_CONFIG_FIELDS = [
     "recommendation",
     "selection_rule",
@@ -1755,6 +1943,161 @@ def write_recommended_config(path: Path, rows: list[dict[str, str]]) -> dict[str
     recommended = select_recommended_config(rows)
     write_rows(path, [recommended], RECOMMENDED_CONFIG_FIELDS)
     return recommended
+
+
+def save_calibrated_model(path: Path, model: VoiceLockModel) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    speakers = sorted(model.codebooks)
+    np.savez_compressed(
+        path,
+        speakers=np.array(speakers),
+        thresholds=np.array([model.thresholds[speaker] for speaker in speakers]),
+        passphrase_thresholds=np.array([model.passphrase_thresholds[speaker] for speaker in speakers]),
+        all_feature_names=np.array(model.feature_names),
+        zscore_mean=model.zscore_mean, zscore_std=model.zscore_std,
+        quality_baseline_keys=np.array(sorted(model.quality_baseline), dtype=str),
+        quality_baseline=np.array([model.quality_baseline[key] for key in sorted(model.quality_baseline)]),
+        phrase_template_counts=np.array([len(model.passphrase_train_by_speaker[speaker]) for speaker in speakers]),
+        feature_set=np.array([model.feature_set]),
+        passphrase_feature_set=np.array([model.passphrase_feature_set]),
+        passphrase_aggregate=np.array([model.passphrase_aggregate]),
+        dtw_window_ratio=np.array([model.dtw_window_ratio]),
+        dtw_warp_penalty=np.array([model.dtw_warp_penalty]),
+        decision_mode=np.array([model.decision_mode]),
+        fusion_voice_weight=np.array([model.fusion_voice_weight]),
+        fusion_threshold=np.array([model.fusion_threshold]),
+        quality_weight=np.array([model.quality_weight]),
+        passphrase_check=np.array([str(model.passphrase_check)]),
+        calibration_mode=np.array([model.calibration_mode]),
+        voice_metric=np.array([model.voice_metric]),
+        vad_mode=np.array([model.vad_mode]),
+        cepstral_normalization=np.array([model.cepstral_normalization]),
+        dtw_max_run=np.array([model.dtw_max_run]),
+        voice_guard=np.array([model.voice_guard]),
+        passphrase_guard=np.array([model.passphrase_guard]),
+        **{f"codebook_{speaker}": model.codebooks[speaker] for speaker in speakers},
+        **{f"phrase_{speaker}_{index}": matrix for speaker in speakers for index, matrix in enumerate(model.passphrase_train_by_speaker[speaker])},
+    )
+
+
+def cmd_calibration_experiments(args: argparse.Namespace) -> None:
+    output = project_path(args.output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    names, rows, features = load_feature_archive(project_path(args.features))
+    trials = collect_calibration_trials(names, rows, features, verbose=True)
+    speakers = sorted({trial["claim_speaker"] for trial in trials})
+    voice_thresholds, phrase_thresholds, cohort_thresholds, threshold_rows = {}, {}, {}, []
+    for speaker in speakers:
+        genuine = [trial for trial in trials if trial["claim_speaker"] == speaker and trial["genuine"]]
+        voice_thresholds[speaker] = calibration_threshold([trial["voice_distance"] for trial in genuine], args.threshold_std)
+        phrase_thresholds[speaker] = calibration_threshold([trial["passphrase_distance"] for trial in genuine], args.threshold_std)
+        cohort_thresholds[speaker] = calibration_threshold([trial["cohort_distance"] for trial in genuine], args.threshold_std)
+        threshold_rows.append({
+            "speaker_id": speaker, "held_out_recordings": len(genuine),
+            "voice_threshold": voice_thresholds[speaker], "passphrase_threshold": phrase_thresholds[speaker],
+            "cohort_threshold": cohort_thresholds[speaker],
+        })
+    for trial in trials:
+        speaker = trial["claim_speaker"]
+        trial["voice_score"] = safe_ratio(trial["voice_distance"], voice_thresholds[speaker])
+        trial["passphrase_score"] = safe_ratio(trial["passphrase_distance"], phrase_thresholds[speaker])
+    wide_policy = fit_score_fusion(trials)
+
+    train = {speaker: [] for speaker in speakers}
+    for row, matrix in zip(rows, features):
+        if row["split"] == "train":
+            train[row["speaker_id"]].append(matrix)
+    dims = select_dims(names, "mfcc")
+    sliced = {speaker: [matrix[:, dims] for matrix in matrices] for speaker, matrices in train.items()}
+    codebooks = {speaker: lbg_codebook(np.vstack(matrices), 16) for speaker, matrices in sliced.items()}
+    old_thresholds = {
+        speaker: train_threshold(
+            [quantization_distance(matrix, codebook) for matrix in sliced[speaker]],
+            [quantization_distance(matrix, codebook) for other, matrices in sliced.items() if other != speaker for matrix in matrices],
+            2.0, 0.5,
+        )
+        for speaker, codebook in codebooks.items()
+    }
+    old_phrase_thresholds, _ = train_passphrase_thresholds(train, "mean_std", 1.0, "min", 1.0, 0.0)
+    strict_trials, cohort_trials = [], []
+    for trial in trials:
+        speaker = trial["claim_speaker"]
+        trial["strict_passphrase_score"] = safe_ratio(trial["passphrase_distance"], old_phrase_thresholds[speaker])
+        trial["cohort_voice_score"] = safe_ratio(trial["cohort_distance"], cohort_thresholds[speaker])
+        strict_trials.append(dict(trial, passphrase_score=trial["strict_passphrase_score"]))
+        cohort_trials.append(dict(trial, voice_score=trial["cohort_voice_score"], passphrase_score=trial["strict_passphrase_score"]))
+    strict_policy = fit_score_fusion(strict_trials)
+    cohort_policy = fit_score_fusion(cohort_trials)
+    candidates = {"loo_fusion": wide_policy, "loo_voice_fusion": strict_policy, "cohort_fusion": cohort_policy}
+    selected = min(candidates, key=lambda name: (
+        candidates[name]["calibration_false_accept"], candidates[name]["calibration_false_reject"],
+        0 if name == "loo_voice_fusion" else 1 if name == "cohort_fusion" else 2,
+    ))
+    policy = dict(candidates[selected])
+    corresponding_gates = {"loo_fusion": "loo_two_layer", "loo_voice_fusion": "loo_voice", "cohort_fusion": "cohort_two_layer"}
+    if policy["changed_from_two_layer"] == 0:
+        selected = corresponding_gates[selected]
+    policy.update({
+        "selection_source": "training recordings only; leave-one-recording-out with fold-specific normalization",
+        "feature_set": "mfcc", "codebook_size": 16, "passphrase_feature_set": "all",
+        "threshold_std": args.threshold_std, "quality_weight": 0.0,
+        "selected_variant": selected, "candidates": candidates,
+        "model_path": display_path(output / selected / "model.npz"),
+        "deployment_status": "experimental_not_default",
+    })
+    write_rows(output / "calibration_trials.csv", trials, list(trials[0]))
+    write_rows(output / "thresholds.csv", threshold_rows, list(threshold_rows[0]))
+    (output / "policy.json").write_text(json.dumps(policy, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Training-only fusion policy: {json.dumps(policy)}", flush=True)
+    base = replace(
+        load_model(args.base_model, args.features), feature_names=names, codebooks=codebooks,
+        thresholds=old_thresholds, passphrase_thresholds=old_phrase_thresholds,
+        passphrase_train_by_speaker=train, feature_set="mfcc", passphrase_feature_set="all",
+        passphrase_aggregate="min", dtw_window_ratio=1.0, dtw_warp_penalty=0.0,
+        decision_mode="two_layer", fusion_voice_weight=0.5, fusion_threshold=1.0,
+        quality_weight=0.0, passphrase_check=True, calibration_mode="in_sample_converged",
+    )
+    loo_voice = replace(base, thresholds=voice_thresholds, calibration_mode="leave_one_recording_out")
+    loo = replace(loo_voice, passphrase_thresholds=phrase_thresholds)
+    fused = replace(loo, decision_mode="fusion", fusion_voice_weight=wide_policy["fusion_voice_weight"], fusion_threshold=wide_policy["fusion_threshold"])
+    strict_fused = replace(loo_voice, decision_mode="fusion", fusion_voice_weight=strict_policy["fusion_voice_weight"], fusion_threshold=strict_policy["fusion_threshold"])
+    cohort = replace(loo_voice, thresholds=cohort_thresholds, voice_metric="cohort_ratio")
+    cohort_fused = replace(cohort, decision_mode="fusion", fusion_voice_weight=cohort_policy["fusion_voice_weight"], fusion_threshold=cohort_policy["fusion_threshold"])
+    variants = {
+        "converged_in_sample": base, "loo_voice": loo_voice, "loo_two_layer": loo, "loo_fusion": fused,
+        "loo_voice_fusion": strict_fused, "cohort_two_layer": cohort, "cohort_fusion": cohort_fused,
+    }
+    comparison = []
+    decisions = {}
+    for name, model in variants.items():
+        result_rows = []
+        started = time.perf_counter()
+        for row, matrix in zip(rows, features):
+            if row["split"] != "train":
+                result_rows.append(predict_feature_matrix(
+                    matrix, model, row, estimated_snr_db=row["estimated_snr_db"],
+                    quality_score=float(row["quality_score"]), low_quality=truthy_text(row["low_quality"]),
+                ))
+        variant_dir = output / name
+        variant_dir.mkdir(exist_ok=True)
+        save_vq_results(variant_dir / "recognition_results.csv", result_rows)
+        save_vq_metrics(variant_dir / "metrics.csv", result_rows)
+        save_calibrated_model(variant_dir / "model.npz", model)
+        decisions[name] = [row["decision"] for row in result_rows]
+        comparison.append({
+            "variant": name,
+            **summarize_decisions(result_rows, decisions[name]),
+            "mean_prediction_ms": f"{1000 * (time.perf_counter() - started) / len(result_rows):.2f}",
+            "decision_mode": model.decision_mode, "fusion_voice_weight": model.fusion_voice_weight,
+            "fusion_threshold": model.fusion_threshold,
+            "voice_metric": model.voice_metric,
+            "model_path": display_path(variant_dir / "model.npz"),
+        })
+        print(f"Evaluation {name}: {json.dumps(comparison[-1])}", flush=True)
+    policy["evaluation_changed_from_two_layer"] = sum(left != right for left, right in zip(decisions[corresponding_gates.get(selected, selected)], decisions[selected]))
+    (output / "policy.json").write_text(json.dumps(policy, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_rows(output / "comparison.csv", comparison, list(comparison[0]))
+    print(f"Saved calibration comparison: {output / 'comparison.csv'}", flush=True)
 
 
 def cmd_recommend_config(args: argparse.Namespace) -> None:
@@ -2348,6 +2691,19 @@ def build_parser() -> argparse.ArgumentParser:
     recommend.add_argument("--matrix", default="results/tables/fusion_matrix.csv")
     recommend.add_argument("--output", default="results/tables/recommended_config.csv")
     recommend.set_defaults(func=cmd_recommend_config)
+
+    calibration = sub.add_parser("calibration-experiments", help="compare converged VQ, training-only leave-one-recording-out thresholds, and fitted fusion")
+    calibration.add_argument("--features", default="data/features/srdp_features.npz")
+    calibration.add_argument("--base-model", default="models/lbg_vq_codebooks.npz")
+    calibration.add_argument("--output-dir", default="results/calibration_experiments")
+    calibration.add_argument("--threshold-std", type=float, default=2.0)
+    calibration.set_defaults(func=cmd_calibration_experiments)
+
+    followup = sub.add_parser("followup-experiments", help="audit DTW paths and compare VAD, bounded fusion, and CMN/CMVN without replacing defaults")
+    followup.add_argument("--output-dir", default="results/followup_experiments")
+    followup.add_argument("--stage", choices=["all", "audit", "dtw", "preprocessing", "fusion"], default="all")
+    from algorithm_followup import run_experiments
+    followup.set_defaults(func=run_experiments)
 
     smoke = sub.add_parser("smoke-test", help="verify metadata, pipeline outputs, and recommended config")
     smoke.add_argument("--metadata", default="data/demo_audio/metadata_srdp.csv")

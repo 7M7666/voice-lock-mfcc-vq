@@ -1,0 +1,17 @@
+﻿variant,kind,count,correct,accepted,false_reject,false_accept,wrong_speaker,frontend_rejected,mean_end_to_end_ms
+trim,colored_noise,5,5,0,0,0,0,0,95.85718002635986
+trim,dc,1,1,0,0,0,0,1,10.986000066623092
+trim,silence,1,1,0,0,0,0,1,12.764499988406897
+trim,speech_gain_0.01,24,16,16,8,0,0,0,49.09802917488074
+trim,speech_gain_0.1,24,21,21,3,0,0,0,50.14390833578849
+trim,speech_gain_1,24,21,21,3,0,0,0,50.11967500225486
+trim,tone_440Hz,1,1,0,0,0,0,0,31.997299985960126
+trim,white_noise,5,5,0,0,0,0,0,97.5094800349325
+frame,colored_noise,5,5,0,0,0,0,0,89.68384000472724
+frame,dc,1,1,0,0,0,0,1,1.1247999500483274
+frame,silence,1,1,0,0,0,0,1,1.082399976439774
+frame,speech_gain_0.01,24,15,16,8,0,1,0,41.920870843265824
+frame,speech_gain_0.1,24,19,19,5,0,0,0,41.35518333350774
+frame,speech_gain_1,24,20,20,4,0,0,0,41.38077498646453
+frame,tone_440Hz,1,1,0,0,0,0,0,23.374799988232553
+frame,white_noise,5,5,0,0,0,0,5,3.098480007611215

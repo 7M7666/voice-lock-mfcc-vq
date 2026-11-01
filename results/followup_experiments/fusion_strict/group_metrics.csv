@@ -1,0 +1,13 @@
+﻿group_by,group,count,fusion_all_accuracy,registered_test_accuracy,wrong_passphrase_reject_rate,impostor_reject_rate,false_reject,false_accept,wrong_speaker
+true_speaker,S01,6,0.666667,0.666667,,,2,0,0
+true_speaker,S01_wrong,9,1.000000,,1.000000,,0,0,0
+true_speaker,S02,6,0.666667,0.666667,,,2,0,0
+true_speaker,S02_wrong,9,1.000000,,1.000000,,0,0,0
+true_speaker,S03,6,0.500000,0.500000,,,3,0,0
+true_speaker,S03_wrong,9,1.000000,,1.000000,,0,0,0
+true_speaker,S04,6,0.333333,0.333333,,,4,0,0
+true_speaker,S04_wrong,9,1.000000,,1.000000,,0,0,0
+true_speaker,U01,3,1.000000,,,1.000000,0,0,0
+environment,corridor,20,0.850000,0.625000,1.000000,,3,0,0
+environment,dorm,23,0.913043,0.750000,1.000000,1.000000,2,0,0
+environment,lab,20,0.700000,0.250000,1.000000,,6,0,0

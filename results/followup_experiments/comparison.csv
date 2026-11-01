@@ -1,0 +1,13 @@
+﻿variant,fusion_all_accuracy,registered_test_accuracy,wrong_passphrase_reject_rate,impostor_reject_rate,false_reject,false_accept,wrong_speaker,mean_scoring_ms,p95_scoring_ms,voice_feature_set,phrase_feature_set,vad_mode,cepstral_normalization,dtw_max_run,model_path
+baseline,0.936508,0.875000,0.972222,1.000000,3,1,0,23.648811110650144,41.277599998284124,mfcc,all,trim,none,0,results/followup_experiments/baseline/model.npz
+dtw_run2,0.936508,0.916667,0.944444,1.000000,2,2,0,16.35834444240327,29.02214002097025,mfcc,all,trim,none,2,results/followup_experiments/dtw_run2/model.npz
+dtw_run3,0.936508,0.916667,0.944444,1.000000,2,2,0,18.054952371924642,32.400609983596944,mfcc,all,trim,none,3,results/followup_experiments/dtw_run3/model.npz
+dtw_run5,0.952381,0.916667,0.972222,1.000000,2,1,0,22.31621903936482,38.969959923997514,mfcc,all,trim,none,5,results/followup_experiments/dtw_run5/model.npz
+dtw_medoid,0.936508,0.958333,0.944444,0.666667,1,3,0,2.7035063498520424,4.32989994296804,mfcc,all,trim,none,0,results/followup_experiments/dtw_medoid/model.npz
+dtw_single_first,0.904762,0.875000,0.944444,0.666667,3,3,0,2.725271430487434,4.804250004235654,mfcc,all,trim,none,0,results/followup_experiments/dtw_single_first/model.npz
+dtw_mfcc_delta,0.904762,0.791667,0.972222,1.000000,5,1,0,22.87757937382493,39.46745004504918,mfcc,mfcc_delta,trim,none,0,results/followup_experiments/dtw_mfcc_delta/model.npz
+frame_vad,0.904762,0.833333,0.944444,1.000000,4,2,0,26.324115870963958,38.01020992686972,mfcc,all,frame,none,0,results/followup_experiments/frame_vad/model.npz
+cmn,0.920635,0.916667,0.916667,1.000000,2,3,0,23.3726809503481,37.98250992549583,mfcc,all,trim,cmn,0,results/followup_experiments/cmn/model.npz
+cmvn,0.936508,0.875000,1.000000,0.666667,3,1,0,23.494906353926847,39.02194008696824,mfcc,all,trim,cmvn,0,results/followup_experiments/cmvn/model.npz
+voice_mfcc_delta,0.904762,0.875000,0.916667,1.000000,3,3,0,24.120444446683877,41.63866994203999,mfcc_delta,all,trim,none,0,results/followup_experiments/voice_mfcc_delta/model.npz
+voice_all,0.904762,0.875000,0.916667,1.000000,3,3,0,24.667214284399673,41.66629998944699,all,all,trim,none,0,results/followup_experiments/voice_all/model.npz

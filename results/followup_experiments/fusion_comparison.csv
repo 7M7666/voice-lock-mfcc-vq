@@ -1,0 +1,5 @@
+﻿variant,fusion_all_accuracy,registered_test_accuracy,wrong_passphrase_reject_rate,impostor_reject_rate,false_reject,false_accept,wrong_speaker,mean_scoring_ms,p95_scoring_ms,voice_feature_set,phrase_feature_set,vad_mode,cepstral_normalization,dtw_max_run,model_path
+fusion_two_layer,0.936508,0.875000,0.972222,1.000000,3,1,0,24.374212696409177,42.002180044073604,mfcc,all,trim,none,0,results/followup_experiments/fusion_two_layer/model.npz
+fusion_strict,0.825397,0.541667,1.000000,1.000000,11,0,0,24.142030164569853,41.85810999479144,mfcc,all,trim,none,0,results/followup_experiments/fusion_strict/model.npz
+fusion_voice_complement,0.825397,0.541667,1.000000,1.000000,11,0,0,24.171622213168394,42.160939984023564,mfcc,all,trim,none,0,results/followup_experiments/fusion_voice_complement/model.npz
+fusion_both_complement,0.825397,0.541667,1.000000,1.000000,11,0,0,24.225922225649278,41.793840005993836,mfcc,all,trim,none,0,results/followup_experiments/fusion_both_complement/model.npz

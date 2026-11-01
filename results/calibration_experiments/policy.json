@@ -1,0 +1,48 @@
+{
+  "fusion_voice_weight": 0.5,
+  "fusion_threshold": 1.0,
+  "calibration_false_accept": 0,
+  "calibration_false_reject": 6,
+  "calibration_genuine_trials": 36,
+  "calibration_impostor_trials": 108,
+  "changed_from_two_layer": 0,
+  "selection_source": "training recordings only; leave-one-recording-out with fold-specific normalization",
+  "feature_set": "mfcc",
+  "codebook_size": 16,
+  "passphrase_feature_set": "all",
+  "threshold_std": 2.0,
+  "quality_weight": 0.0,
+  "selected_variant": "cohort_two_layer",
+  "candidates": {
+    "loo_fusion": {
+      "fusion_voice_weight": 0.7,
+      "fusion_threshold": 0.7596789987453424,
+      "calibration_false_accept": 0,
+      "calibration_false_reject": 25,
+      "calibration_genuine_trials": 36,
+      "calibration_impostor_trials": 108,
+      "changed_from_two_layer": 44
+    },
+    "loo_voice_fusion": {
+      "fusion_voice_weight": 0.3,
+      "fusion_threshold": 0.8543561419841142,
+      "calibration_false_accept": 0,
+      "calibration_false_reject": 20,
+      "calibration_genuine_trials": 36,
+      "calibration_impostor_trials": 108,
+      "changed_from_two_layer": 26
+    },
+    "cohort_fusion": {
+      "fusion_voice_weight": 0.5,
+      "fusion_threshold": 1.0,
+      "calibration_false_accept": 0,
+      "calibration_false_reject": 6,
+      "calibration_genuine_trials": 36,
+      "calibration_impostor_trials": 108,
+      "changed_from_two_layer": 0
+    }
+  },
+  "model_path": "results/calibration_experiments/cohort_two_layer/model.npz",
+  "evaluation_changed_from_two_layer": 0,
+  "deployment_status": "experimental_not_default"
+}
