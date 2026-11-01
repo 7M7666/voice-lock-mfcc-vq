@@ -36,7 +36,7 @@ class GuiWorkflowTests(unittest.TestCase):
         cls.recordings = tempfile.TemporaryDirectory(prefix="srdp_gui_enrollment_")
         cls.addClassCleanup(cls.recordings.cleanup)
         cls.training = []
-        for original in original_training:
+        for original in original_training[:gui.ENROLLMENT_REQUIRED]:
             audio, sr = gui.load_audio(original)
             path = Path(cls.recordings.name) / original.name
             gui.sf.write(path, gui.np.pad(audio, (sr // 10, sr // 10)), sr, subtype="FLOAT")
@@ -100,7 +100,7 @@ class GuiWorkflowTests(unittest.TestCase):
 
     def test_complete_registration_saves_and_returns_to_verification(self):
         self.record_registration("新用户")
-        self.assertEqual(self.window.accepted_enrollment_count(), 8)
+        self.assertEqual(self.window.accepted_enrollment_count(), 4)
         self.assertTrue(self.window.enroll_build_button.isEnabled())
         self.window.enroll_build_button.click()
         self.wait_session()
@@ -127,7 +127,7 @@ class GuiWorkflowTests(unittest.TestCase):
 
     def test_consistency_warning_precedes_model_build_and_allows_explicit_continue(self):
         self.record_registration("新用户")
-        checks = [{"voice_distance": 0., "passphrase_distance": 0., "flagged": False} for _ in range(8)]
+        checks = [{"voice_distance": 0., "passphrase_distance": 0., "flagged": False} for _ in range(gui.ENROLLMENT_REQUIRED)]
         checks[-1] = {"voice_distance": 10., "passphrase_distance": 12., "flagged": True}
         with patch.object(gui, "enrollment_consistency_check", return_value=checks), \
              patch.object(QMessageBox, "question", return_value=QMessageBox.No) as question, \
@@ -136,19 +136,19 @@ class GuiWorkflowTests(unittest.TestCase):
             self.wait_session()
         build.assert_not_called()
         self.assertEqual(question.call_args.args[-1], QMessageBox.No)
-        self.assertIn("第8条录音", question.call_args.args[2])
-        self.assertIn("差异较大", self.window.enroll_take_list.item(7).text())
+        self.assertIn("第4条录音", question.call_args.args[2])
+        self.assertIn("差异较大", self.window.enroll_take_list.item(3).text())
         self.assertIn("不能据此判断说错口令", self.window.enroll_quality_label.text())
-        self.assertEqual(self.window.accepted_enrollment_count(), 8)
+        self.assertEqual(self.window.accepted_enrollment_count(), 4)
         self.assertFalse(gui.user_model_path("新用户", self.root / "users").exists())
         with patch.object(gui, "enrollment_consistency_check", return_value=checks), \
              patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
             self.window.complete_registration()
             self.wait_session()
-        self.assertEqual(len(self.window.session_model.passphrase_templates), 8)
+        self.assertEqual(len(self.window.session_model.passphrase_templates), 4)
         report = json.loads(next((self.root / "diagnostics/enrollments").glob("*.json")).read_text(encoding="utf-8"))
-        self.assertTrue(report["samples"][7]["consistency_check"]["flagged"])
-        self.assertTrue(report["samples"][7]["accepted"])
+        self.assertTrue(report["samples"][3]["consistency_check"]["flagged"])
+        self.assertTrue(report["samples"][3]["accepted"])
 
     def test_cancel_consistency_does_not_build_or_save_a_model(self):
         self.record_registration("新用户")
@@ -168,41 +168,41 @@ class GuiWorkflowTests(unittest.TestCase):
             released.set()
             self.wait_session()
         build.assert_not_called()
-        self.assertEqual(self.window.accepted_enrollment_count(), 8)
+        self.assertEqual(self.window.accepted_enrollment_count(), 4)
         self.assertFalse(gui.user_model_path("新用户", self.root / "users").exists())
 
-    def test_seven_accepted_takes_cannot_register_even_by_direct_call(self):
-        self.record_registration("新用户", count=7)
-        self.assertEqual(self.window.accepted_enrollment_count(), 7)
+    def test_three_accepted_takes_cannot_register_even_by_direct_call(self):
+        self.record_registration("新用户", count=3)
+        self.assertEqual(self.window.accepted_enrollment_count(), 3)
         self.assertFalse(self.window.enroll_build_button.isEnabled())
         self.assertTrue(self.window.enroll_record_button.isEnabled())
-        self.assertEqual(self.window.enroll_progress.value(), 7)
-        self.assertEqual(self.window.enroll_progress.maximum(), 8)
-        self.assertEqual(self.window.enroll_record_button.text(), "录制第 8 条语音")
+        self.assertEqual(self.window.enroll_progress.value(), 3)
+        self.assertEqual(self.window.enroll_progress.maximum(), 4)
+        self.assertEqual(self.window.enroll_record_button.text(), "录制第 4 条语音")
         self.assertIn("还需要1条", self.window.enroll_status_label.text())
         with patch.object(QMessageBox, "warning") as warning, patch.object(gui, "build_session_enrollment_model") as build:
             self.window.complete_registration()
-        warning.assert_called_once_with(self.window, "注册样本不足", "至少需要 8 条合格注册样本。")
+        warning.assert_called_once_with(self.window, "注册样本不足", "至少需要 4 条合格注册样本。")
         build.assert_not_called()
         self.assertIsNone(self.window.session_thread)
         self.assertFalse(gui.user_model_path("新用户", self.root / "users").exists())
 
-    def test_eight_accepted_takes_stop_recording_until_reset(self):
+    def test_four_accepted_takes_stop_recording_until_reset(self):
         self.record_registration("新用户")
         self.window.set_audio_busy(True)
         self.assertFalse(self.window.enroll_build_button.isEnabled())
         self.window.set_audio_busy(False)
         self.assertTrue(self.window.enroll_build_button.isEnabled())
         self.assertFalse(self.window.enroll_record_button.isEnabled())
-        self.assertEqual(self.window.enroll_record_button.text(), "已录满8条")
-        self.assertEqual(self.window.enroll_progress.value(), 8)
-        self.assertIn("已达到8条", self.window.enroll_status_label.text())
+        self.assertEqual(self.window.enroll_record_button.text(), "已录满4条")
+        self.assertEqual(self.window.enroll_progress.value(), 4)
+        self.assertIn("已达到4条", self.window.enroll_status_label.text())
         with patch.object(gui, "record_audio_to_temp") as record:
             self.window.enroll_record_button.click()
             self.window.record_enrollment_take()
         record.assert_not_called()
         self.assertIsNone(self.window.session_thread)
-        self.assertEqual(self.window.accepted_enrollment_count(), 8)
+        self.assertEqual(self.window.accepted_enrollment_count(), 4)
         self.window.enroll_name_input.clear()
         self.assertFalse(self.window.enroll_build_button.isEnabled())
         self.assertFalse(self.window.enroll_record_button.isEnabled())
@@ -212,7 +212,7 @@ class GuiWorkflowTests(unittest.TestCase):
         self.assertTrue(self.window.enroll_record_button.isEnabled())
         self.assertEqual(self.window.enroll_record_button.text(), "录制第 1 条语音")
         self.assertFalse(self.window.enroll_build_button.isEnabled())
-        self.assertIn("8 条合格", self.window.enroll_status_label.text())
+        self.assertIn("4 条合格", self.window.enroll_status_label.text())
 
     def test_registration_warning_is_visible_and_one_take_can_be_removed(self):
         self.record_registration("新用户")
@@ -269,8 +269,8 @@ class GuiWorkflowTests(unittest.TestCase):
         self.assertNotIn("self_check", report["samples"][0])
         self.assertTrue(all("self_check" in sample for sample in report["samples"][1:]))
 
-    def test_rejected_eighth_take_can_be_removed_and_rerecorded_without_counting(self):
-        self.record_registration("新用户", count=7)
+    def test_rejected_fourth_take_can_be_removed_and_rerecorded_without_counting(self):
+        self.record_registration("新用户", count=3)
         path = self.training[-1]
         before = path.read_bytes()
         extracted = gui.extract_one_audio_features(path, self.base_model)
@@ -279,24 +279,24 @@ class GuiWorkflowTests(unittest.TestCase):
         ):
             self.window.record_enrollment_take()
             self.wait_session()
-        self.assertEqual(len(self.window.enrollment_takes), 8)
-        self.assertEqual(self.window.accepted_enrollment_count(), 7)
-        self.assertEqual(self.window.enroll_progress.value(), 7)
+        self.assertEqual(len(self.window.enrollment_takes), 4)
+        self.assertEqual(self.window.accepted_enrollment_count(), 3)
+        self.assertEqual(self.window.enroll_progress.value(), 3)
         self.assertFalse(self.window.enroll_build_button.isEnabled())
         self.assertTrue(self.window.enroll_record_button.isEnabled())
-        self.assertIn("不合格", self.window.enroll_take_list.item(7).text())
-        self.assertIn("不低于10 dB", self.window.enroll_take_list.item(7).text())
+        self.assertIn("不合格", self.window.enroll_take_list.item(3).text())
+        self.assertIn("不低于10 dB", self.window.enroll_take_list.item(3).text())
         self.assertIn("估计信噪比：9.00 dB", self.window.enroll_quality_label.text())
         self.assertIn("质量评分：0.200", self.window.enroll_quality_label.text())
         self.window.enroll_remove_button.click()
-        self.assertEqual(len(self.window.enrollment_takes), 7)
-        self.assertEqual(self.window.enroll_progress.value(), 7)
+        self.assertEqual(len(self.window.enrollment_takes), 3)
+        self.assertEqual(self.window.enroll_progress.value(), 3)
         self.assertEqual(path.read_bytes(), before)
         with patch.object(gui, "record_audio_to_temp", return_value=path):
             self.window.record_enrollment_take()
             self.wait_session()
-        self.assertEqual(self.window.accepted_enrollment_count(), 8)
-        self.assertEqual(self.window.enroll_progress.value(), 8)
+        self.assertEqual(self.window.accepted_enrollment_count(), 4)
+        self.assertEqual(self.window.enroll_progress.value(), 4)
         self.assertTrue(self.window.enroll_build_button.isEnabled())
         self.assertFalse(self.window.enroll_record_button.isEnabled())
 
@@ -565,7 +565,7 @@ class GuiWorkflowTests(unittest.TestCase):
             released.wait(3)
             return replace(self.saved_model, speaker_id="已有用户")
         with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes), \
-             patch.object(gui, "enrollment_consistency_check", return_value=[{"voice_distance": 0., "passphrase_distance": 0., "flagged": False}] * 8), \
+             patch.object(gui, "enrollment_consistency_check", return_value=[{"voice_distance": 0., "passphrase_distance": 0., "flagged": False}] * gui.ENROLLMENT_REQUIRED), \
              patch.object(gui, "build_session_enrollment_model", side_effect=build):
             self.window.complete_registration()
             deadline = time.monotonic() + 3

@@ -104,12 +104,12 @@ class EnrollmentConsistencyTests(unittest.TestCase):
         self.model = SimpleNamespace(feature_names=list(srdp.FEATURE_NAMES), feature_set="mfcc",
             passphrase_feature_set="mfcc", dtw_window_ratio=1.0, dtw_warp_penalty=0.0, dtw_max_run=0)
 
-    def test_seven_similar_samples_identify_an_eighth_outlier_without_training(self):
-        features = [np.zeros((30, 31), dtype=np.float32) for _ in range(7)] + [np.full((30, 31), 10., dtype=np.float32)]
+    def test_three_similar_samples_identify_a_fourth_outlier_without_training(self):
+        features = [np.zeros((30, 31), dtype=np.float32) for _ in range(3)] + [np.full((30, 31), 10., dtype=np.float32)]
         originals = [matrix.copy() for matrix in features]
         with patch.object(gui, "lbg_codebook", side_effect=AssertionError("consistency must not train a user model")):
             checks = gui.enrollment_consistency_check(features, self.model)
-        self.assertEqual([check["flagged"] for check in checks], [False] * 7 + [True])
+        self.assertEqual([check["flagged"] for check in checks], [False] * 3 + [True])
         for original, matrix in zip(originals, features):
             np.testing.assert_array_equal(original, matrix)
 
@@ -117,7 +117,7 @@ class EnrollmentConsistencyTests(unittest.TestCase):
         sample = np.repeat(np.arange(5, dtype=np.float32), 6)[:, None] * np.ones((1, 31), dtype=np.float32)
         for last in (sample, np.repeat(sample, 2, axis=0)):
             with self.subTest(frames=len(last)):
-                checks = gui.enrollment_consistency_check([sample] * 7 + [last], self.model)
+                checks = gui.enrollment_consistency_check([sample] * 3 + [last], self.model)
                 self.assertFalse(any(check["flagged"] for check in checks))
 
     def test_phrase_dimensions_can_flag_an_outlier_without_a_voice_difference(self):
@@ -125,7 +125,7 @@ class EnrollmentConsistencyTests(unittest.TestCase):
         sample = np.zeros((30, 31), dtype=np.float32)
         outlier = sample.copy()
         outlier[:, 24:] = 10.
-        checks = gui.enrollment_consistency_check([sample] * 7 + [outlier], self.model)
+        checks = gui.enrollment_consistency_check([sample] * 3 + [outlier], self.model)
         self.assertEqual(checks[-1]["voice_distance"], 0.)
         self.assertGreater(checks[-1]["passphrase_distance"], checks[-1]["passphrase_advisory_limit"])
         self.assertTrue(checks[-1]["flagged"])
