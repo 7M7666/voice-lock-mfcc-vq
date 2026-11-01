@@ -74,6 +74,7 @@ from user_cleanup import build_user_cleanup, execute_user_cleanup
 
 
 SAMPLE_RATE = 16000
+ENROLLMENT_REQUIRED = 8
 TEMP_AUDIO_DIR = PROJECT_ROOT / "tmp" / "gui_recordings"
 APP_DATA_DIR = PROJECT_ROOT / "app_data"
 USER_MODEL_DIR = APP_DATA_DIR / "users"
@@ -889,7 +890,7 @@ class SrdpVoiceLockWindow(QMainWindow):
         layout.addWidget(title)
         layout.addWidget(QLabel("选择你的用户，点击录音，然后说“芝麻开门”。"))
 
-        self.verify_empty_label = QLabel("还没有注册用户，请先录入三条语音完成注册。")
+        self.verify_empty_label = QLabel(f"还没有注册用户，请先录入 {ENROLLMENT_REQUIRED} 条合格语音完成注册。")
         self.verify_empty_label.setWordWrap(True)
         layout.addWidget(self.verify_empty_label)
         users_row = QHBoxLayout()
@@ -1057,7 +1058,7 @@ class SrdpVoiceLockWindow(QMainWindow):
 
         settings_group = QGroupBox("注册新用户")
         settings_layout = QFormLayout(settings_group)
-        note = QLabel("每次说“芝麻开门”。至少录入三条合格语音，再点击“完成注册”。")
+        note = QLabel(f"每次说“芝麻开门”。需要录入 {ENROLLMENT_REQUIRED} 条合格语音才能完成注册。")
         note.setWordWrap(True)
         self.enroll_name_input = QLineEdit()
         self.enroll_name_input.setPlaceholderText("输入你的名字")
@@ -1081,9 +1082,9 @@ class SrdpVoiceLockWindow(QMainWindow):
         settings_layout.addRow("固定口令", QLabel("芝麻开门"))
         settings_layout.addRow("录音时长", self.enroll_duration_spin)
         self.enroll_progress = QProgressBar()
-        self.enroll_progress.setRange(0, 3)
+        self.enroll_progress.setRange(0, ENROLLMENT_REQUIRED)
         self.enroll_progress.setValue(0)
-        self.enroll_progress.setFormat("已完成 %v / 3 条合格录音")
+        self.enroll_progress.setFormat(f"已完成 %v / {ENROLLMENT_REQUIRED} 条合格录音")
         settings_layout.addRow(self.enroll_progress)
         settings_layout.addRow(self.enroll_record_button)
         self.enroll_capture_progress = QProgressBar()
@@ -1574,7 +1575,8 @@ class SrdpVoiceLockWindow(QMainWindow):
                 self.refresh_enrollment_list()
                 count = self.accepted_enrollment_count()
                 self.enroll_status_label.setText(f"第{len(self.enrollment_takes)}次：{take.reason}。" +
-                    ("已达到三条，可以完成注册。" if count >= 3 else f"还需要{3 - count}条合格录音。"))
+                    (f"已达到{ENROLLMENT_REQUIRED}条，可以完成注册。" if count >= ENROLLMENT_REQUIRED
+                     else f"还需要{ENROLLMENT_REQUIRED - count}条合格录音。"))
             elif self.session_kind == "verification":
                 result, latency, display = payload
                 self.verify_waveform_canvas.plot_audio(display[0], display[1])
@@ -1597,7 +1599,7 @@ class SrdpVoiceLockWindow(QMainWindow):
         event.accept()
 
     def record_enrollment_take(self) -> None:
-        if self.audio_busy:
+        if self.audio_busy or self.accepted_enrollment_count() >= ENROLLMENT_REQUIRED:
             return
         if self.model is None:
             QMessageBox.warning(self, "模型未加载", "模型未加载，无法提取注册特征。")
@@ -1655,13 +1657,19 @@ class SrdpVoiceLockWindow(QMainWindow):
     def update_enrollment_actions(self) -> None:
         accepted_count = self.accepted_enrollment_count()
         self.enroll_build_button.setEnabled(
-            not self.audio_busy and accepted_count >= 3 and bool(self.enroll_name_input.text().strip())
+            not self.audio_busy and accepted_count >= ENROLLMENT_REQUIRED and bool(self.enroll_name_input.text().strip())
+        )
+        self.enroll_record_button.setEnabled(
+            not self.audio_busy and self.model is not None and accepted_count < ENROLLMENT_REQUIRED
         )
         self.temp_verify_button.setEnabled(not self.audio_busy and self.session_model is not None)
         self.delete_user_button.setEnabled(not self.audio_busy and self.session_model is not None)
         self.enroll_remove_button.setEnabled(not self.audio_busy and self.enroll_take_list.currentRow() >= 0)
-        self.enroll_progress.setValue(min(accepted_count, 3))
-        self.enroll_record_button.setText("再录一条（可选）" if accepted_count >= 3 else f"录制第 {accepted_count + 1} 条语音")
+        self.enroll_progress.setValue(min(accepted_count, ENROLLMENT_REQUIRED))
+        self.enroll_record_button.setText(
+            f"已录满{ENROLLMENT_REQUIRED}条" if accepted_count >= ENROLLMENT_REQUIRED
+            else f"录制第 {accepted_count + 1} 条语音"
+        )
 
     def set_audio_busy(self, busy: bool) -> None:
         self.audio_busy = busy
@@ -1672,7 +1680,6 @@ class SrdpVoiceLockWindow(QMainWindow):
             self.delete_user_data_checkbox,
         ):
             widget.setEnabled(not busy)
-        self.enroll_record_button.setEnabled(not busy and self.model is not None)
         self.verify_cancel_button.setEnabled(busy)
         self.enroll_cancel_button.setEnabled(busy)
         for button in self.nav_buttons:
@@ -1685,7 +1692,7 @@ class SrdpVoiceLockWindow(QMainWindow):
         self.enroll_take_list.clear()
         self.enroll_waveform_canvas.plot_empty()
         self.enroll_mfcc_canvas.plot_empty()
-        self.enroll_status_label.setText("录音状态: 已重新开始，请录入至少 3 条注册语音。")
+        self.enroll_status_label.setText(f"录音状态: 已重新开始，请录入 {ENROLLMENT_REQUIRED} 条合格注册语音。")
         self.update_enrollment_actions()
 
     def reset_user_verdict(self) -> None:
@@ -1792,8 +1799,8 @@ class SrdpVoiceLockWindow(QMainWindow):
         accepted_features = [
             features for take, features in zip(self.enrollment_takes, self.enrollment_features) if take.accepted
         ]
-        if len(accepted_features) < 3:
-            QMessageBox.warning(self, "注册样本不足", "至少需要 3 条合格注册样本。")
+        if len(accepted_features) < ENROLLMENT_REQUIRED:
+            QMessageBox.warning(self, "注册样本不足", f"至少需要 {ENROLLMENT_REQUIRED} 条合格注册样本。")
             return
         speaker_id = self.enroll_name_input.text().strip()
         if not speaker_id or speaker_id == "REJECT":
