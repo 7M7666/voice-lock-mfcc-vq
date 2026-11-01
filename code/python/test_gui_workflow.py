@@ -346,11 +346,11 @@ class GuiWorkflowTests(unittest.TestCase):
         self.assertFalse(self.window.delete_user_data_checkbox.isChecked())
         self.window.delete_user_data_checkbox.setChecked(True)
         before = path.read_bytes()
-        with patch.object(gui, "PROJECT_ROOT", self.root), patch.object(QMessageBox, "question", return_value=QMessageBox.No) as question:
+        with patch.object(gui, "PROJECT_ROOT", self.root), patch.object(gui, "runtime_data_root", return_value=self.root), patch.object(QMessageBox, "question", return_value=QMessageBox.No) as question:
             self.window.delete_saved_user()
         self.assertIn("清理", question.call_args.args[2])
         self.assertEqual(path.read_bytes(), before)
-        with patch.object(gui, "PROJECT_ROOT", self.root), patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
+        with patch.object(gui, "PROJECT_ROOT", self.root), patch.object(gui, "runtime_data_root", return_value=self.root), patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
             self.window.delete_saved_user()
         self.assertFalse(path.exists())
         self.assertEqual(self.window.history, [])
@@ -425,7 +425,7 @@ class GuiWorkflowTests(unittest.TestCase):
             self.window.replay_history_record()
         self.assertIn("复核", dialog.call_args.args[1])
         self.assertEqual(len(self.window.history), 1)
-        with patch.object(gui, "PROJECT_ROOT", self.root), patch.object(QMessageBox, "information"):
+        with patch.object(gui, "PROJECT_ROOT", self.root), patch.object(gui, "runtime_data_root", return_value=self.root), patch.object(QMessageBox, "information"):
             self.window.export_history()
         exported = next((self.root / "results/gui_history").glob("*.csv"))
         with exported.open(encoding="utf-8-sig", newline="") as handle:

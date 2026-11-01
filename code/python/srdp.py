@@ -9,6 +9,8 @@ import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from runtime_paths import resource_root
+
 import librosa
 import matplotlib
 import numpy as np
@@ -20,7 +22,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = resource_root()
 DATA_DIR = PROJECT_ROOT / "data"
 DEMO_AUDIO_DIR = DATA_DIR / "demo_audio"
 FEATURE_DIR = DATA_DIR / "features"

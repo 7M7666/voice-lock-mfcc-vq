@@ -1,0 +1,46 @@
+name: Check Windows release ZIP
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Draft release tag to test
+        required: true
+      asset:
+        description: ZIP asset name
+        required: true
+permissions:
+  contents: read
+jobs:
+  packaged-app:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download and extract the built release (no Python setup or pip install)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_ASSET: ${{ inputs.asset }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $download = Join-Path $env:RUNNER_TEMP 'release-download'
+          New-Item -ItemType Directory -Path $download | Out-Null
+          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern $env:RELEASE_ASSET --dir $download
+          if ($LASTEXITCODE -ne 0) { throw 'Release download failed' }
+          $extract = Join-Path $env:RUNNER_TEMP '中文路径 Release Test'
+          Expand-Archive -LiteralPath (Join-Path $download $env:RELEASE_ASSET) -DestinationPath $extract
+          "APP_EXE=$(Join-Path $extract 'SRDPVoiceLock/SRDPVoiceLock.exe')" >> $env:GITHUB_ENV
+      - name: Run the EXE with development paths removed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Remove-Item Env:PYTHONHOME,Env:PYTHONPATH,Env:VIRTUAL_ENV -ErrorAction SilentlyContinue
+          $env:PATH = "$env:WINDIR\System32;$env:WINDIR"
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP 'release-user-data'
+          $report = Join-Path $env:RUNNER_TEMP 'packaged-self-test.txt'
+          $process = Start-Process -FilePath $env:APP_EXE -ArgumentList @('--self-test', "`"$report`"") -WorkingDirectory $env:WINDIR -PassThru -Wait -WindowStyle Hidden
+          if (Test-Path -LiteralPath $report) { Get-Content -LiteralPath $report }
+          $startup = Join-Path $env:LOCALAPPDATA 'SRDPVoiceLock/logs/startup.log'
+          if (Test-Path -LiteralPath $startup) { Get-Content -LiteralPath $startup -Tail 80 }
+          if ($process.ExitCode -ne 0) { throw "Packaged EXE failed: $($process.ExitCode)" }
+          if (-not (Test-Path -LiteralPath $report)) { throw 'Self-test report is missing' }

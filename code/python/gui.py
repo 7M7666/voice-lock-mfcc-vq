@@ -71,6 +71,7 @@ from srdp import (
 )
 from speech_frames import recording_quality
 from user_cleanup import build_user_cleanup, execute_user_cleanup
+from runtime_paths import runtime_data_root
 
 
 SAMPLE_RATE = 16000
@@ -83,8 +84,8 @@ ENROLLMENT_MAX_QUALITY_SCORE = 0.35
 ENROLLMENT_OUTLIER_RATIO = 3.0
 ENROLLMENT_OUTLIER_MAD_FACTOR = 3.0
 ENROLLMENT_DISTANCE_EPSILON = 1e-6
-TEMP_AUDIO_DIR = PROJECT_ROOT / "tmp" / "gui_recordings"
-APP_DATA_DIR = PROJECT_ROOT / "app_data"
+TEMP_AUDIO_DIR = runtime_data_root(PROJECT_ROOT) / "tmp" / "gui_recordings"
+APP_DATA_DIR = runtime_data_root(PROJECT_ROOT) / "app_data"
 USER_MODEL_DIR = APP_DATA_DIR / "users"
 HISTORY_PATH = APP_DATA_DIR / "history.csv"
 PHRASE_EXPLANATION = "口令模板匹配比较声音相似度，受音色、语速和发音影响；未识别成文字，不能据此断言口令内容正确或错误。"
@@ -1490,7 +1491,7 @@ class SrdpVoiceLockWindow(QMainWindow):
         if not self.history:
             QMessageBox.information(self, "无历史", "当前没有可导出的验证历史。")
             return
-        out_dir = PROJECT_ROOT / "results" / "gui_history"
+        out_dir = runtime_data_root(PROJECT_ROOT) / "results" / "gui_history"
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / f"session_{time.strftime('%Y%m%d_%H%M%S')}.csv"
         with path.open("w", encoding="utf-8-sig", newline="") as handle:
@@ -1823,7 +1824,7 @@ class SrdpVoiceLockWindow(QMainWindow):
         plan = None
         if self.delete_user_data_checkbox.isChecked():
             try:
-                plan = build_user_cleanup(name, path, self.user_model_dir, self.history_path, PROJECT_ROOT)
+                plan = build_user_cleanup(name, path, self.user_model_dir, self.history_path, runtime_data_root(PROJECT_ROOT))
             except (OSError, ValueError, KeyError) as error:
                 QMessageBox.critical(self, "无法准备清理", str(error))
                 return
