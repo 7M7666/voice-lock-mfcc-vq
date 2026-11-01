@@ -83,7 +83,6 @@ ENROLLMENT_MAX_QUALITY_SCORE = 0.35
 ENROLLMENT_OUTLIER_RATIO = 3.0
 ENROLLMENT_OUTLIER_MAD_FACTOR = 3.0
 ENROLLMENT_DISTANCE_EPSILON = 1e-6
-POST_ENROLLMENT_STEPS = (("芝麻开门", True), ("芝麻开门", True), ("芝麻关门", False), ("芝麻开灯", False))
 TEMP_AUDIO_DIR = PROJECT_ROOT / "tmp" / "gui_recordings"
 APP_DATA_DIR = PROJECT_ROOT / "app_data"
 USER_MODEL_DIR = APP_DATA_DIR / "users"
@@ -830,8 +829,6 @@ class SrdpVoiceLockWindow(QMainWindow):
         self.enrollment_features: list[np.ndarray] = []
         self.enrollment_consistency: dict[int, dict] = {}
         self.pending_registration = None
-        self.post_enrollment_report = None
-        self.post_enrollment_report_path = None
         self.session_model: SessionEnrollmentModel | None = None
         self.audio_busy = False
         self.session_thread = None
@@ -942,25 +939,6 @@ class SrdpVoiceLockWindow(QMainWindow):
         layout.addWidget(self.delete_user_data_checkbox)
         self.temp_model_label = QLabel("尚未选择用户")
         layout.addWidget(self.temp_model_label)
-        self.post_enrollment_group = QGroupBox("注册后独立检查：4次新录音")
-        check_layout = QVBoxLayout(self.post_enrollment_group)
-        check_note = QLabel("请由本人按提示重新录音：正确口令2次、相近错误口令各1次。"
-            "这些录音不加入模型，不调整阈值；程序不转写文字，需由你确认按提示说话。4次检查不代表90%准确率。")
-        check_note.setWordWrap(True)
-        check_layout.addWidget(check_note)
-        self.post_enrollment_results_label = QLabel()
-        self.post_enrollment_results_label.setWordWrap(True)
-        check_layout.addWidget(self.post_enrollment_results_label)
-        self.post_enrollment_status_label = QLabel("注册后请完成4次独立检查。")
-        self.post_enrollment_status_label.setWordWrap(True)
-        check_layout.addWidget(self.post_enrollment_status_label)
-        self.post_enrollment_button = QPushButton()
-        self.post_enrollment_button.clicked.connect(self.record_post_enrollment_check)
-        check_layout.addWidget(self.post_enrollment_button)
-        self.post_enrollment_reset_button = QPushButton("重新开始4次检查（原报告保留）")
-        self.post_enrollment_reset_button.clicked.connect(self.reset_post_enrollment_check)
-        check_layout.addWidget(self.post_enrollment_reset_button)
-        layout.addWidget(self.post_enrollment_group)
         self.verify_duration_spin = QDoubleSpinBox()
         self.verify_duration_spin.setRange(1.0, 5.0)
         self.verify_duration_spin.setValue(3.0)
@@ -1547,8 +1525,6 @@ class SrdpVoiceLockWindow(QMainWindow):
         self.status_label.setText(message)
         if self.session_kind in {"enrollment", "consistency", "registration"}:
             self.enroll_status_label.setText(message)
-        elif self.session_kind == "post_enrollment":
-            self.post_enrollment_status_label.setText(message)
         elif self.session_kind == "microphone":
             self.mic_label.setText(message)
         else:
@@ -1563,8 +1539,7 @@ class SrdpVoiceLockWindow(QMainWindow):
         progress.setValue(round(100 * fraction))
         level.setText(f"录音电平: {min(100, round(100 * peak))}%" + ("，音量过大" if peak >= .99 else ""))
         if fraction == 0:
-            phrase = POST_ENROLLMENT_STEPS[len(self.completed_post_enrollment_checks())][0] if self.session_kind == "post_enrollment" else "芝麻开门"
-            self.on_session_stage(f"麦克风已启动，正在录音，请说“{phrase}”。")
+            self.on_session_stage("麦克风已启动，正在录音，请说“芝麻开门”。")
 
     def cancel_session_task(self):
         if self.session_thread is None or self.session_result_applied:
@@ -1578,8 +1553,6 @@ class SrdpVoiceLockWindow(QMainWindow):
         message = "正在取消，等待当前步骤结束；本次不会保存结果。"
         if self.session_kind in {"enrollment", "consistency", "registration"}:
             self.enroll_status_label.setText(message)
-        elif self.session_kind == "post_enrollment":
-            self.post_enrollment_status_label.setText(message)
         else:
             self.temp_verify_result_label.setText("本次已取消")
             self.temp_verify_reason_label.setText(message)
@@ -1591,8 +1564,6 @@ class SrdpVoiceLockWindow(QMainWindow):
         if self.session_cancel.is_set():
             if self.session_kind in {"enrollment", "consistency", "registration"}:
                 self.enroll_status_label.setText("本次已取消，已有注册样本和用户保留。")
-            elif self.session_kind == "post_enrollment":
-                self.post_enrollment_status_label.setText("本项已取消，可重新录制；已完成的检查和报告保留。")
             elif self.session_kind == "microphone":
                 self.mic_label.setText("麦克风: 测试已取消")
             else:
@@ -1612,8 +1583,6 @@ class SrdpVoiceLockWindow(QMainWindow):
             return
         if self.session_kind in {"enrollment", "consistency", "registration"}:
             self.enroll_status_label.setText("本次未完成，已有录音保留，可以重试。")
-        elif self.session_kind == "post_enrollment":
-            self.post_enrollment_status_label.setText("本项检查未完成，请重试；已有报告和模型保留。")
         elif self.session_kind == "microphone":
             self.mic_label.setText("麦克风: 测试失败")
         else:
@@ -1652,8 +1621,6 @@ class SrdpVoiceLockWindow(QMainWindow):
                 self.finish_registration(payload)
             elif self.session_kind == "consistency":
                 self.pending_registration = payload
-            elif self.session_kind == "post_enrollment":
-                self.finish_post_enrollment_check(payload)
             elif self.session_kind == "microphone":
                 self.mic_label.setText(f"麦克风: 可用 峰值 {payload:.3f}")
         except Exception as error:
@@ -1756,7 +1723,6 @@ class SrdpVoiceLockWindow(QMainWindow):
             f"已录满{ENROLLMENT_REQUIRED}条" if accepted_count >= ENROLLMENT_REQUIRED
             else f"录制第 {accepted_count + 1} 条语音"
         )
-        self.refresh_post_enrollment_check()
 
     def set_audio_busy(self, busy: bool) -> None:
         self.audio_busy = busy
@@ -1803,7 +1769,6 @@ class SrdpVoiceLockWindow(QMainWindow):
 
     def show_user_model(self) -> None:
         model = self.session_model
-        self.reset_post_enrollment_check()
         self.temp_model_label.setText(f"当前验证用户：{model.speaker_id}")
         self.temp_verify_button.setText("开始录音验证")
         self.reset_user_verdict()
@@ -1968,86 +1933,6 @@ class SrdpVoiceLockWindow(QMainWindow):
         passed = sum(check["accepted"] for check in checks)
         self.temp_verify_reason_label.setText(f"{model.speaker_id} 已注册并保存，样本自检{passed}/{len(checks)}通过。"
             "自检只检查注册样本，还需录音验证；质量记录已保存。")
-
-    def completed_post_enrollment_checks(self):
-        return [attempt for attempt in self.post_enrollment_report["attempts"] if attempt["input_valid"]] if self.post_enrollment_report else []
-
-    def reset_post_enrollment_check(self):
-        if self.audio_busy and self.session_kind == "post_enrollment":
-            return
-        self.post_enrollment_report = None
-        self.post_enrollment_report_path = None
-        self.post_enrollment_status_label.setText("请按顺序完成4次独立录音检查；不影响已保存模型。")
-        self.refresh_post_enrollment_check()
-
-    def refresh_post_enrollment_check(self):
-        completed = self.completed_post_enrollment_checks()
-        self.post_enrollment_group.setVisible(self.session_model is not None)
-        lines = []
-        for index, (phrase, expected) in enumerate(POST_ENROLLMENT_STEPS):
-            text = f"{index + 1}. “{phrase}”（预期{'接受' if expected else '拒绝'}）："
-            if index < len(completed):
-                attempt = completed[index]
-                text += (f"实际{'接受' if attempt['accepted'] else '拒绝'}，"
-                    + ("符合预期" if attempt["matches_expectation"] else "发现问题")
-                    + f"；声纹 {attempt['result'].get('voice_score', '-')}，口令 {attempt['result'].get('passphrase_score', '-')}。")
-            else:
-                text += "待录音"
-            lines.append(text)
-        self.post_enrollment_results_label.setText("\n".join(lines))
-        count = len(completed)
-        self.post_enrollment_button.setEnabled(not self.audio_busy and self.session_model is not None and count < len(POST_ENROLLMENT_STEPS))
-        self.post_enrollment_button.setText(f"录制第{count + 1}/4次：{POST_ENROLLMENT_STEPS[count][0]}" if count < len(POST_ENROLLMENT_STEPS) else "4次检查已完成")
-        self.post_enrollment_reset_button.setEnabled(not self.audio_busy and self.session_model is not None)
-
-    def record_post_enrollment_check(self):
-        if self.audio_busy or self.session_model is None or len(self.completed_post_enrollment_checks()) >= len(POST_ENROLLMENT_STEPS):
-            return
-        model = self.session_model
-        if self.post_enrollment_report is None:
-            fingerprint = session_model_fingerprint(model)
-            self.post_enrollment_report_path = self.user_model_dir.parent / "diagnostics" / "post_enrollment" / f"{time.time_ns()}_{fingerprint[:12]}.json"
-            self.post_enrollment_report = {"speaker_id": model.speaker_id, "model_fingerprint": fingerprint,
-                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"), "attempts": [],
-                "limitation": "Four user-prompted new recordings only; no transcription, training or threshold tuning; not an accuracy estimate"}
-        index = len(self.completed_post_enrollment_checks())
-        phrase = POST_ENROLLMENT_STEPS[index][0]
-        duration, rate = self.verify_duration_spin.value(), self.sample_rate_input.value()
-        self.post_enrollment_status_label.setText(f"第{index + 1}/4次：请由本人说“{phrase}”，等待麦克风启动提示。")
-        self.verify_capture_progress.setValue(0)
-        def job(worker):
-            path = worker.record("post_enrollment", duration, rate)
-            worker.stage.emit(f"录音已结束，正在检查“{phrase}”；本次录音不参与建模。")
-            result = predict_with_session_model(path, model)
-            worker.checkpoint()
-            return result
-        self.start_session_task("post_enrollment", job)
-
-    def finish_post_enrollment_check(self, result):
-        index = len(self.completed_post_enrollment_checks())
-        phrase, expected = POST_ENROLLMENT_STEPS[index]
-        valid = result.get("rejection_stage") != "input"
-        accepted = result["decision"] != "REJECT"
-        attempt = {"step": index + 1, "prompted_phrase": phrase, "expected_accept": expected,
-            "input_valid": valid, "accepted": accepted, "matches_expectation": accepted == expected if valid else None,
-            "result": result, "time": time.strftime("%Y-%m-%d %H:%M:%S")}
-        report = {**self.post_enrollment_report, "attempts": [*self.post_enrollment_report["attempts"], attempt]}
-        self.post_enrollment_report_path.parent.mkdir(parents=True, exist_ok=True)
-        self.post_enrollment_report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-        self.post_enrollment_report = report
-        self.refresh_post_enrollment_check()
-        if not valid:
-            message = "本次录音无效，不计入4次检查，也不视为错误口令成功拒绝；请重录本项。"
-        elif len(self.completed_post_enrollment_checks()) == len(POST_ENROLLMENT_STEPS):
-            correct = sum(item["accepted"] for item in self.completed_post_enrollment_checks()[:2])
-            wrong = sum(not item["accepted"] for item in self.completed_post_enrollment_checks()[2:])
-            message = f"快速检查完成：本人正确口令接受{correct}/2，相近错误口令拒绝{wrong}/2。"
-            if correct < 2 or wrong < 2:
-                message += "发现本人打不开或错误口令被接受，请复核或重新注册。"
-            message += "仅4次检查，不代表90%准确率；拒绝可能来自声纹分支。模型和阈值未调整。"
-        else:
-            message = "本项" + ("符合预期。" if attempt["matches_expectation"] else "发现问题，请在全部检查后复核。")
-        self.post_enrollment_status_label.setText(message)
 
     def verify_temporary_user_by_recording(self) -> None:
         if self.audio_busy:

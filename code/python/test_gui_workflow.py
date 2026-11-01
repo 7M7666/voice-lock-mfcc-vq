@@ -123,8 +123,7 @@ class GuiWorkflowTests(unittest.TestCase):
             self.assertIn("passphrase_score", sample["self_check"])
             self.assertIn("consistency_check", sample)
         self.assertIn("还需录音验证", self.window.temp_verify_reason_label.text())
-        self.assertFalse(self.window.post_enrollment_group.isHidden())
-        self.assertIn("1/4", self.window.post_enrollment_button.text())
+        self.assertFalse(any("注册后独立检查" in group.title() for group in self.window.findChildren(gui.QGroupBox)))
 
     def test_consistency_warning_precedes_model_build_and_allows_explicit_continue(self):
         self.record_registration("新用户")
@@ -605,109 +604,6 @@ class GuiWorkflowTests(unittest.TestCase):
                 gui.record_audio_to_temp("cancelled", 3.0, cancel=cancelled, progress=progress)
             stop.assert_called_once()
             write.assert_not_called()
-
-    def post_check_result(self, accepted=False, input_valid=True):
-        return {"decision": self.window.session_model.speaker_id if accepted else "REJECT",
-            "rejection_stage": "" if input_valid else "input", "file_path": str(self.sample),
-            "model_fingerprint": gui.session_model_fingerprint(self.window.session_model),
-            "voice_score": ".5", "passphrase_score": ".6" if accepted else "1.5"}
-
-    def run_post_check(self, accepted=False, input_valid=True):
-        with patch.object(gui, "record_audio_to_temp", return_value=self.sample), \
-             patch.object(gui, "predict_with_session_model", return_value=self.post_check_result(accepted, input_valid)):
-            self.window.post_enrollment_button.click()
-            self.wait_session()
-
-    def test_four_independent_checks_report_both_failure_types_without_changing_model(self):
-        path = self.seed_user("测试用户")
-        before = path.read_bytes()
-        fingerprint = gui.session_model_fingerprint(self.window.session_model)
-        with patch.object(gui, "build_session_enrollment_model", side_effect=AssertionError("must not train")), \
-             patch.object(gui, "save_user_model", side_effect=AssertionError("must not save model")), \
-             patch.object(gui, "assess_enrollment_take", side_effect=AssertionError("must not enroll")):
-            for index, accepted in enumerate((True, False, True, False)):
-                self.assertIn(gui.POST_ENROLLMENT_STEPS[index][0], self.window.post_enrollment_button.text())
-                self.run_post_check(accepted)
-        report = json.loads(self.window.post_enrollment_report_path.read_text(encoding="utf-8"))
-        self.assertEqual([item["prompted_phrase"] for item in report["attempts"]], ["芝麻开门", "芝麻开门", "芝麻关门", "芝麻开灯"])
-        self.assertEqual([item["matches_expectation"] for item in report["attempts"]], [True, False, False, True])
-        self.assertEqual(report["model_fingerprint"], fingerprint)
-        self.assertEqual(path.read_bytes(), before)
-        self.assertEqual(gui.session_model_fingerprint(self.window.session_model), fingerprint)
-        self.assertEqual(self.window.accepted_enrollment_count(), 0)
-        self.assertEqual(self.window.history, [])
-        self.assertFalse(self.window.post_enrollment_button.isEnabled())
-        self.assertIn("本人正确口令接受1/2", self.window.post_enrollment_status_label.text())
-        self.assertIn("相近错误口令拒绝1/2", self.window.post_enrollment_status_label.text())
-        self.assertIn("不代表90%准确率", self.window.post_enrollment_status_label.text())
-
-    def test_invalid_wrong_phrase_recording_must_be_repeated_and_is_not_a_successful_rejection(self):
-        self.seed_user("测试用户")
-        self.run_post_check(True)
-        self.run_post_check(True)
-        self.window.on_session_progress(0., .1)
-        self.assertIn("请说“芝麻关门”", self.window.post_enrollment_status_label.text())
-        self.run_post_check(False, input_valid=False)
-        self.assertEqual(len(self.window.completed_post_enrollment_checks()), 2)
-        self.assertIsNone(self.window.post_enrollment_report["attempts"][-1]["matches_expectation"])
-        self.assertIn("3/4", self.window.post_enrollment_button.text())
-        self.assertIn("本次录音无效", self.window.post_enrollment_status_label.text())
-        self.run_post_check(False)
-        self.run_post_check(False)
-        self.assertEqual(len(self.window.completed_post_enrollment_checks()), 4)
-        self.assertEqual(len(self.window.post_enrollment_report["attempts"]), 5)
-
-    def test_post_check_cancellation_preserves_previous_results_and_prompt(self):
-        self.seed_user("测试用户")
-        self.run_post_check(True)
-        before = self.window.post_enrollment_report_path.read_bytes()
-        started, released = Event(), Event()
-        def predict(*args):
-            started.set()
-            released.wait(3)
-            return self.post_check_result(True)
-        with patch.object(gui, "record_audio_to_temp", return_value=self.sample), \
-             patch.object(gui, "predict_with_session_model", side_effect=predict):
-            self.window.post_enrollment_button.click()
-            deadline = time.monotonic() + 3
-            while not started.is_set() and time.monotonic() < deadline:
-                QTest.qWait(10)
-            self.assertTrue(started.is_set())
-            self.assertFalse(self.window.post_enrollment_reset_button.isEnabled())
-            self.window.verify_cancel_button.click()
-            released.set()
-            self.wait_session()
-        self.assertEqual(len(self.window.completed_post_enrollment_checks()), 1)
-        self.assertEqual(self.window.post_enrollment_report_path.read_bytes(), before)
-        self.assertIn("2/4", self.window.post_enrollment_button.text())
-        self.assertIn("已取消", self.window.post_enrollment_status_label.text())
-
-    def test_post_check_restart_and_switching_users_keep_previous_reports(self):
-        self.seed_user("甲")
-        self.run_post_check(True)
-        first_report = self.window.post_enrollment_report_path
-        self.window.post_enrollment_reset_button.click()
-        self.assertTrue(first_report.exists())
-        self.assertEqual(len(self.window.completed_post_enrollment_checks()), 0)
-        self.run_post_check(True)
-        self.assertNotEqual(first_report, self.window.post_enrollment_report_path)
-        self.seed_user("乙")
-        self.assertEqual(len(self.window.completed_post_enrollment_checks()), 0)
-        self.run_post_check(True)
-        self.assertEqual(self.window.post_enrollment_report["speaker_id"], "乙")
-        self.assertTrue(first_report.exists())
-
-    def test_post_check_microphone_failure_does_not_advance_the_prompt(self):
-        self.seed_user("测试用户")
-        with patch.object(gui, "record_audio_to_temp", side_effect=RuntimeError("无麦克风")), \
-             patch.object(QMessageBox, "critical") as dialog:
-            self.window.post_enrollment_button.click()
-            self.wait_session()
-        dialog.assert_called_once()
-        self.assertEqual(self.window.completed_post_enrollment_checks(), [])
-        self.assertFalse(self.window.post_enrollment_report_path.exists())
-        self.assertTrue(self.window.post_enrollment_button.isEnabled())
-        self.assertIn("1/4", self.window.post_enrollment_button.text())
 
     def test_experiment_table_explains_saved_results_in_chinese(self):
         self.assertEqual(self.window.metrics_table.rowCount(), 3)
