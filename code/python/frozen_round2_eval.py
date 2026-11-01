@@ -7,6 +7,7 @@ or absolute; labels describe the actual speaker/phrase, confirmed by a human.
 Run: python code/python/frozen_round2_eval.py --manifest round2.json
 --bundle <frozen-directory> --protocol <next_round_protocol.json>
 --output-dir <new-directory>. Use --development-test for synthetic/Mock evidence.
+Project-local outputs must be Git-ignored under tmp_round2/; external paths are allowed.
 The eight frozen comparators include two_layer, so nine distinct policies run.
 """
 from __future__ import annotations
@@ -16,6 +17,7 @@ import csv
 import hashlib
 import json
 import math
+import subprocess
 from pathlib import Path
 
 import gui
@@ -205,6 +207,7 @@ def score_claim(sample, target, context):
         model_fingerprint=context["candidate"]["model_fingerprints"][target],
         voice_threshold=model.voice_threshold, phrase_threshold=model.passphrase_threshold,
         app_phrase_limit=model.passphrase_accept_score, scores={}, baseline=None,
+        structure_baseline=None, baseline_mismatch_reason="",
         decisions=dict.fromkeys(context["variants"]), reasons={}, boundary_issues=[],
         baseline_consistent=False, status="ok", error="")
     try:
@@ -218,22 +221,31 @@ def score_claim(sample, target, context):
         row.update(raw_scores(sample["path"], model))
         values, replayed, _ = structure.score(sample["path"], target, context["models"],
                                               context["sides"], context["thresholds"])
-        if values is None or replayed["decision"] != row["baseline"]:
-            raise ValueError("Frozen score did not reproduce original App input/decision")
+        row["structure_baseline"] = replayed["decision"]
+        if row["structure_baseline"] != row["baseline"]:
+            row["status"] = "baseline_mismatch"
+            row["baseline_mismatch_reason"] = (
+                f"structure.score baseline={row['structure_baseline']} differs from independent App={row['baseline']}")
+            row["boundary_issues"].append(row["baseline_mismatch_reason"])
+        if values is None:
+            if row["baseline_mismatch_reason"]:
+                return row
+            raise ValueError("Frozen score did not reproduce original App input")
         row["scores"] = values
         if any(not math.isfinite(values[k]) for k in structure.fusion.STREAM_NAMES):
             raise ValueError("Nonfinite original/Delta/spectral score")
         if math.isnan(values["pitch_relative"]):
             raise ValueError("Invalid relative pitch score")
-        if not math.isfinite(values["pitch_relative"]):
+        if not math.isfinite(values["pitch_relative"]) and row["status"] == "ok":
             row["status"] = "pitch_unavailable"
         for name in context["variants"]:
             policy = context["policies"][name]
             accepted = bool(structure.apply([values], policy)[0])
             row["decisions"][name] = target if accepted else "REJECT"
             row["reasons"][name] = "" if accepted else rejection_reasons(values, policy)
-        row["baseline_consistent"] = row["decisions"]["two_layer"] == row["baseline"]
-        if not row["baseline_consistent"]:
+        two_layer_consistent = row["decisions"]["two_layer"] == row["baseline"]
+        row["baseline_consistent"] = two_layer_consistent and not row["baseline_mismatch_reason"]
+        if not two_layer_consistent:
             row["boundary_issues"].append("Original App/frozen two_layer decisions differ")
         gates = [("voice_mfcc", "raw_voice_score", 1.)]
         gates += [("phrase_mfcc", "raw_phrase_score", limit) for limit in
@@ -242,7 +254,8 @@ def score_claim(sample, target, context):
             if (values[frozen_field] <= limit) != (row[raw_field] <= limit):
                 row["boundary_issues"].append(f"{frozen_field} raw/display gate differs at {limit}")
     except Exception as error:
-        row.update(status="scoring_error", error=f"{type(error).__name__}: {error}",
+        row.update(status="baseline_mismatch" if row["baseline_mismatch_reason"] else "scoring_error",
+                   error=f"{type(error).__name__}: {error}",
                    decisions=dict.fromkeys(context["variants"]), baseline_consistent=False)
     return row
 
@@ -299,6 +312,7 @@ def summarize(rows, context, development_test=False):
         "alias_decisions_equal": alias_decisions_equal,
         "interpretation": "Candidate equals pitch_relative_best_single_1p1; no extra fusion gain can be claimed.",
         "scoring_errors": sum(r["status"] == "scoring_error" for r in rows),
+        "baseline_mismatches": sum(r["status"] == "baseline_mismatch" for r in rows),
         "boundary_disagreements": sum(bool(r["boundary_issues"]) for r in rows),
         "protocol_success_rules": context["protocol"]["pilot_success_rules"]}
 
@@ -321,10 +335,19 @@ def write_csv(path, rows, fields):
 
 
 def run(manifest_path, bundle, protocol_path, output, *, development_test=False, root=ROOT):
+    root = root.resolve()
     output = output.resolve()
     if output.exists() or output.is_relative_to(bundle.resolve()) or any(output.is_relative_to((root / name).resolve())
                               for name in ("app_data", "tmp", "data", "models", "code")):
         raise ValueError("Output must be a new directory outside protected input/source directories")
+    if output.is_relative_to(root):
+        if not output.is_relative_to(root / "tmp_round2"):
+            raise ValueError("Project-local output must be under tmp_round2/")
+        for name in ("trials.csv", "boundary_disagreements.csv", "summary.json"):
+            ignored = subprocess.run(["git", "check-ignore", "--quiet", "--", str(output / name)],
+                                     cwd=root, capture_output=True)
+            if ignored.returncode != 0:
+                raise ValueError(f"Project-local output must be Git-ignored: {output / name}")
     context = load_freeze(bundle, protocol_path, root)
     context["protected"][manifest_path.resolve()] = digest(manifest_path)
     recordings = validate_recordings(read_json(manifest_path), context["protocol"]["holdout"],

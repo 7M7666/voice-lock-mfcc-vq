@@ -1,5 +1,6 @@
 import hashlib
 import json
+import subprocess
 import tempfile
 import unittest
 import wave
@@ -138,7 +139,7 @@ class ScoringTests(unittest.TestCase):
                        "sha256": "a" * 64, "speaker": "lwl2", "sequence": 1,
                        "phrase": PHRASES[0], "confirmed": True}
 
-    def score(self, raw_phrase=.8, *, values=None, baseline=None, error=None):
+    def score(self, raw_phrase=.8, *, values=None, baseline=None, replayed=None, error=None):
         values = values or {"voice_mfcc": .5, "phrase_mfcc": float(f"{raw_phrase:.6f}"),
             "phrase_delta": .8, "phrase_spectral": .8, "pitch_relative": .5}
         baseline = baseline or {"decision": "lwl2" if raw_phrase <= 1. else "REJECT",
@@ -148,8 +149,26 @@ class ScoringTests(unittest.TestCase):
                     "raw_phrase_score": raw_phrase, "raw_voice_distance": .5,
                     "raw_phrase_distance": raw_phrase}), \
                 patch.object(runner.structure, "score", side_effect=error,
-                             return_value=(values, baseline, [])):
+                             return_value=(values, replayed or baseline, [])):
             return runner.score_claim(self.sample, "lwl2", self.context)
+
+    def test_structure_baseline_disagreement_is_explicit_and_blocks_complete_batch(self):
+        for raw_phrase, structure_decision in ((.8, "REJECT"), (1.2, "lwl2")):
+            with self.subTest(raw_phrase=raw_phrase):
+                row = self.score(raw_phrase, replayed={"decision": structure_decision})
+                self.assertEqual(row["status"], "baseline_mismatch")
+                self.assertEqual(row["structure_baseline"], structure_decision)
+                self.assertEqual(row["baseline"], "lwl2" if raw_phrase <= 1. else "REJECT")
+                self.assertEqual(row["raw_phrase_score"], raw_phrase)
+                self.assertIn("structure.score", row["baseline_mismatch_reason"])
+                self.assertTrue(row["boundary_issues"])
+                self.assertFalse(row["baseline_consistent"])
+                rows = self.complete_rows()
+                rows[0] = row
+                summary = runner.summarize(rows, self.context)
+                self.assertEqual(summary["claims"], 48)
+                self.assertFalse(summary["conclusion_eligible"])
+                self.assertFalse(summary["gain_counts_usable"])
 
     def test_one_and_one_point_one_rounding_disagreements_are_detected(self):
         for value in (1.0000004, 1.1000004):
@@ -272,7 +291,9 @@ class FrozenRunnerTests(unittest.TestCase):
         self.bundle.mkdir()
         self.protocol_path = self.root / "next_round_protocol.json"
         self.manifest_path = self.root / "round2.json"
-        self.output = self.root / "evaluation"
+        subprocess.run(["git", "init", "--quiet", str(self.root)], check=True, capture_output=True)
+        (self.root / ".gitignore").write_text("tmp*/\n", encoding="utf-8")
+        self.output = self.root / "tmp_round2" / "evaluation"
         self.json_write = lambda path, data: path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         model_files = self.bundle / "models"
         model_files.mkdir()
@@ -436,8 +457,63 @@ class FrozenRunnerTests(unittest.TestCase):
         self.assertIn("raw_phrase_score", trials[0])
         self.assertIn("policy", trials[0])
         self.assertEqual(len(list(self.output.iterdir())), 3)
+        status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"],
+                                cwd=self.root, check=True, capture_output=True, text=True)
+        self.assertNotIn("tmp_round2/", status.stdout)
         with self.assertRaisesRegex(ValueError, "new directory"):
             self.execute()
+
+    def test_project_outputs_reject_unignored_and_other_ignored_directories(self):
+        for relative in ("evaluation", "reports/run", "results/round2", ".git/private", "tmp_other/run"):
+            with self.subTest(relative=relative):
+                self.output = self.root / relative
+                with self.assertRaisesRegex(ValueError, "tmp_round2"):
+                    self.execute()
+                self.assertFalse(self.output.exists())
+
+    def test_project_output_requires_all_result_files_to_be_git_ignored(self):
+        for patterns in ("", "tmp_round2/*\n!tmp_round2/evaluation/\n"
+                         "tmp_round2/evaluation/*\n!tmp_round2/evaluation/summary.json\n"):
+            with self.subTest(patterns=patterns):
+                (self.root / ".gitignore").write_text(patterns, encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "Git-ignored"):
+                    self.execute()
+                self.assertFalse(self.output.exists())
+
+    def test_new_external_output_is_allowed(self):
+        with tempfile.TemporaryDirectory() as outside:
+            self.output = Path(outside) / "round2-results"
+            summary = self.execute()
+            self.assertEqual(summary["claims"], 48)
+            self.assertTrue((self.output / "summary.json").is_file())
+
+    def test_structure_baseline_mismatch_is_written_to_difference_report(self):
+        original = self.mock_scores
+        for unavailable in (False, True):
+            with self.subTest(unavailable=unavailable):
+                self.output = self.root / "tmp_round2" / str(unavailable)
+                def disagree(path, target, *args):
+                    values, baseline, details = original(path, target, *args)
+                    if path.stem == "lwl2_1" and target == "lwl2":
+                        return None if unavailable else values, {"decision": "REJECT"}, details
+                    return values, baseline, details
+                with patch.object(self, "mock_scores", side_effect=disagree):
+                    summary = self.execute()
+                self.assertEqual(summary["claims"], 48)
+                self.assertEqual(summary["boundary_disagreements"], 1)
+                self.assertEqual(summary["baseline_mismatches"], 1)
+                self.assertEqual(summary["scoring_errors"], 0)
+                self.assertFalse(summary["gain_counts_usable"])
+                import csv
+                with (self.output / "boundary_disagreements.csv").open(encoding="utf-8", newline="") as handle:
+                    differences = list(csv.DictReader(handle))
+                self.assertEqual(len(differences), 1)
+                self.assertEqual(differences[0]["file_path"], "lwl2_1.wav")
+                self.assertEqual(differences[0]["target"], "lwl2")
+                self.assertEqual(differences[0]["baseline"], "lwl2")
+                self.assertEqual(differences[0]["structure_baseline"], "REJECT")
+                self.assertIn("structure.score", differences[0]["baseline_mismatch_reason"])
+                self.assertEqual(differences[0]["status"], "baseline_mismatch")
 
     def test_one_failed_score_retains_all_claims_and_blocks_benefit(self):
         original = self.mock_scores
