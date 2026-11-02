@@ -58,7 +58,7 @@ def kind_for(row, target):
 def replay_profile(model, queries):
     trials = []
     for row in queries:
-        result = gui.predict_with_session_model(ROOT / row["file_path"], model)
+        result = gui.predict_with_session_model_baseline(ROOT / row["file_path"], model)
         trials.append({"file_path": row["file_path"], "target": model.speaker_id,
             "kind": kind_for(row, model.speaker_id), "speaker_label": row["speaker_id"],
             "environment": row["environment"], "phrase_label": row["passphrase"],

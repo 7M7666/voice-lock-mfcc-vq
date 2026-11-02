@@ -112,7 +112,7 @@ def replay(directory, wav):
     with np.load(directory / "phrase_bank.npz", allow_pickle=False) as bank:
         candidate = PhraseCandidate([bank[f"template_{i}"].copy() for i in range(policy["template_count"])],
             **{key: policy[key] for key in ("threshold", "centered", "aggregate", "window_ratio", "warp_penalty", "max_run")})
-    result = gui.predict_with_session_model(wav, model)
+    result = gui.predict_with_session_model_baseline(wav, model)
     features = None if result.get("rejection_stage") == "input" else srdp.extract_one_audio_features(wav, model).features
     return evaluate(candidate, model, result, features)
 
@@ -239,7 +239,7 @@ def run(args):
             candidates[variant] = candidate
         for query in queries:
             path = srdp.project_path(query["file_path"])
-            original = gui.predict_with_session_model(path, model)
+            original = gui.predict_with_session_model_baseline(path, model)
             matrix = None if original.get("rejection_stage") == "input" else features(path, model)
             if "history" in query:
                 row = query["history"]

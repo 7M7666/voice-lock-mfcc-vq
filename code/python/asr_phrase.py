@@ -16,6 +16,9 @@ EXPECTED_HASHES = {
 _lock = threading.Lock()
 _recognizer = None
 
+class AsrError(RuntimeError):
+    """The offline ASR stage did not produce a valid decision."""
+
 def normalize_text(value: str) -> str:
     return ''.join(c for c in unicodedata.normalize('NFKC', value)
                    if not c.isspace() and not unicodedata.category(c).startswith(('P', 'S'))).lower()
@@ -43,14 +46,14 @@ def _load_recognizer():
     for name, expected in EXPECTED_HASHES.items():
         path = folder / name
         if not path.is_file() or _sha256(path) != expected:
-            raise RuntimeError(f'离线语音识别模型缺失或校验不通过：{path}。请安装指定模型后重试。')
+            raise AsrError(f'离线语音识别模型缺失或校验不通过：{path}。请安装指定模型后重试。')
     try:
         import sherpa_onnx
         _recognizer = sherpa_onnx.OfflineRecognizer.from_paraformer(
             paraformer=str(folder/'model.int8.onnx'), tokens=str(folder/'tokens.txt'),
             num_threads=2, sample_rate=16000, feature_dim=80, decoding_method='greedy_search')
     except Exception as exc:
-        raise RuntimeError('离线语音识别加载失败，请检查依赖与模型文件。') from exc
+        raise AsrError('离线语音识别加载失败，请检查依赖与模型文件。') from exc
     return _recognizer
 
 def recognize_fixed_phrase(path: Path) -> str:
@@ -64,7 +67,7 @@ def recognize_fixed_phrase(path: Path) -> str:
             stream.accept_waveform(sr, np.asarray(y, dtype=np.float32))
             rec.decode_stream(stream)
             return stream.result.text
-        except RuntimeError:
+        except AsrError:
             raise
         except Exception as exc:
-            raise RuntimeError('离线语音识别执行失败，本次没有有效判定。') from exc
+            raise AsrError('离线语音识别执行失败，本次没有有效判定。') from exc

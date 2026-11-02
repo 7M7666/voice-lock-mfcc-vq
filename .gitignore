@@ -1,8 +1,14 @@
 code/python/venv/
+.venv/
+venv/
+.env
+.env.*
 **/__pycache__/
 *.pyc
 app_data/
 /models/asr/
+*.onnx
+*.onnx.data
 results/gui_history/
 
 *.tmp

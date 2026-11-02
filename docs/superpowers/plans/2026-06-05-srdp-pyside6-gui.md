@@ -1,6 +1,6 @@
 # SRDP PySide6 GUI Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Archived implementation plan (2026-06-05). The session-only enrollment and A-only architecture below describe that stage. Current persistent users and E integration are documented in the [README](../../../README.md) and [release-readiness record](../../Windows发行准备验收.md); unchecked tasks are not current instructions.
 
 **Goal:** Build a PySide6 desktop GUI for the SRDP voice-lock prototype that can demonstrate fixed samples, selected WAV files, live recording, scores, waveform, MFCC, rejection reasons, history, and temporary on-site enrollment without rewriting the existing backend algorithm.
 

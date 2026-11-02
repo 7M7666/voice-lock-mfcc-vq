@@ -1,4 +1,4 @@
-param([string] $Python = "", [string] $Output = "", [string] $Version = "1.0.0", [string] $AsrModelDir = "")
+param([string] $Python = "", [string] $Output = "", [string] $Version = "dev-local", [string] $AsrModelDir = "")
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 if (-not $Python) { $Python = Join-Path $ProjectRoot "code/python/venv/Scripts/python.exe" }

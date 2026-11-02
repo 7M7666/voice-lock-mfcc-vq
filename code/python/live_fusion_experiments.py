@@ -89,7 +89,7 @@ def build_side_streams(model, enrollment):
 
 
 def score_audio(path, model, side):
-    result = gui.predict_with_session_model(path, model)
+    result = gui.predict_with_session_model_baseline(path, model)
     if result.get("rejection_stage") == "input":
         return None, result
     features = srdp.extract_one_audio_features(path, model).features
