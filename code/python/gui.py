@@ -72,6 +72,7 @@ from srdp import (
 from speech_frames import recording_quality
 from user_cleanup import build_user_cleanup, execute_user_cleanup
 from runtime_paths import runtime_data_root
+from asr_phrase import recognize_fixed_phrase, normalize_text
 
 
 SAMPLE_RATE = 16000
@@ -88,7 +89,7 @@ TEMP_AUDIO_DIR = runtime_data_root(PROJECT_ROOT) / "tmp" / "gui_recordings"
 APP_DATA_DIR = runtime_data_root(PROJECT_ROOT) / "app_data"
 USER_MODEL_DIR = APP_DATA_DIR / "users"
 HISTORY_PATH = APP_DATA_DIR / "history.csv"
-PHRASE_EXPLANATION = "口令模板匹配比较声音相似度，受音色、语速和发音影响；未识别成文字，不能据此断言口令内容正确或错误。"
+PHRASE_EXPLANATION = "口令模板匹配比较声音相似度；个人验证还使用离线语音识别检查口令文字。"
 
 DEMO_SAMPLES = {
     "正常通过 S01": {
@@ -264,6 +265,8 @@ class HistoryRow:
     decision_mode: str = ""
     rejection_stage: str = ""
     voice_metric: str = ""
+    asr_text: str = ""
+    asr_passed: str = ""
 
 
 @dataclass
@@ -621,7 +624,7 @@ def enrollment_self_check(features: list[np.ndarray], model: SessionEnrollmentMo
     return checks
 
 
-def predict_with_session_model(wav_path: Path, session_model: SessionEnrollmentModel) -> dict[str, str]:
+def predict_with_session_model_baseline(wav_path: Path, session_model: SessionEnrollmentModel) -> dict[str, str]:
     diagnostics = {
         "file_path": display_path(wav_path),
         "audio_sha256": hashlib.sha256(wav_path.read_bytes()).hexdigest(),
@@ -701,6 +704,19 @@ def predict_with_session_model(wav_path: Path, session_model: SessionEnrollmentM
         "voiced_end_sec": repr(extracted.voiced_end_sec),
         "rejection_stage": "" if accepted else "voice_and_phrase" if not voice_ok and not passphrase_ok else "voice" if not voice_ok else "passphrase" if not passphrase_ok else "fusion",
     }
+
+
+def predict_with_session_model(wav_path: Path, session_model: SessionEnrollmentModel) -> dict[str, str]:
+    """Personal verification: preserve baseline decision, then require exact ASR text."""
+    result = dict(predict_with_session_model_baseline(wav_path, session_model))
+    if result.get("decision") == "REJECT":
+        return {**result, "asr_text": "", "asr_passed": ""}
+    text = recognize_fixed_phrase(wav_path)
+    passed = normalize_text(text) == "芝麻开门"
+    result.update(asr_text=text, asr_passed=str(passed))
+    if not passed:
+        result.update(decision="REJECT", reject_reason="语音识别口令不匹配", rejection_stage="asr")
+    return result
 
 
 class WaveformCanvas(FigureCanvas):
@@ -1985,6 +2001,7 @@ class SrdpVoiceLockWindow(QMainWindow):
         passphrase_status = "通过" if result.get("passphrase_passed") == "True" else "未通过"
         self.temp_verify_reason_label.setText(
             ("录音未进入声纹和口令比对。" if result.get("rejection_stage") == "input" else f"声纹{voice_status}，口令模板匹配{passphrase_status}。")
+            + (f"语音识别：{result['asr_text'] or '无识别结果'}。" if result.get('asr_passed') else "")
             + (f"{result.get('reject_reason', '')}。请重新录音，保持自然音量并说完整口令。" if decision == "REJECT" else "本次验证已保存到“验证记录”。")
         )
         self.temp_verify_score_label.setText(

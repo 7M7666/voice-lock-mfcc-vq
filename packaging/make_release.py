@@ -21,6 +21,11 @@ def main():
     assert (app / "SRDPVoiceLock.exe").is_file()
     for name in ("models/lbg_vq_codebooks.npz", "data/features/srdp_features.npz"):
         assert sha256(internal / name) == sha256(root / name), name
+    for name, expected in {
+        "model.int8.onnx": "3ef6c19369b912f7caf3cef8e545c5ccd1a33d9d7ec792a46668dc41c4b229ec",
+        "tokens.txt": "4b2d964e18b9cf139b473003b6698fb2ed9a2a5ec55b93daa677b28f578897aa",
+    }.items():
+        assert sha256(internal / "models/asr" / name) == expected, name
     wavs = sorted(internal.rglob("*.wav"))
     assert len(wavs) == 9, [str(p.relative_to(internal)) for p in wavs]
     for wav in wavs:
@@ -45,7 +50,7 @@ def main():
                 source_commit=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
                 source_tree_dirty=bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True).strip()),
                 source_sha256={name: sha256(root / name) for name in (
-                    "code/python/gui.py", "code/python/srdp.py", "code/python/runtime_paths.py",
+                    "code/python/gui.py", "code/python/srdp.py", "code/python/asr_phrase.py", "code/python/runtime_paths.py",
                     "code/python/dtw_paths.py", "code/python/speech_frames.py", "code/python/user_cleanup.py",
                     "packaging/windows_entry.py", "packaging/voice_lock.spec")},
                 packages=packages, bundled_wav_count=9,

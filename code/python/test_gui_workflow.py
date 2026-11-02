@@ -46,6 +46,9 @@ class GuiWorkflowTests(unittest.TestCase):
         cls.sample = gui.PROJECT_ROOT / gui.DEMO_SAMPLES["正常通过 S01"]["wav"]
 
     def setUp(self):
+        self.asr_patch = patch.object(gui, "recognize_fixed_phrase", return_value="芝麻开门")
+        self.asr_patch.start()
+        self.addCleanup(self.asr_patch.stop)
         self.directory = tempfile.TemporaryDirectory(prefix="srdp_gui_workflow_")
         self.root = Path(self.directory.name)
         self.model_patch = patch.object(gui, "load_model", return_value=self.base_model)
@@ -477,7 +480,7 @@ class GuiWorkflowTests(unittest.TestCase):
                 self.assertIn("声纹" + ("通过" if voice == "True" else "未通过"), text)
                 self.assertIn("口令模板匹配" + ("通过" if phrase == "True" else "未通过"), text)
                 self.assertIn("1.235", self.window.temp_verify_score_label.text())
-                self.assertIn("未识别成文字", gui.PHRASE_EXPLANATION)
+                self.assertIn("个人验证还使用离线语音识别", gui.PHRASE_EXPLANATION)
 
     def test_model_fingerprint_changes_with_parameters_and_survives_save_load(self):
         model = self.saved_model

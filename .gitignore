@@ -2,6 +2,7 @@ code/python/venv/
 **/__pycache__/
 *.pyc
 app_data/
+/models/asr/
 results/gui_history/
 
 *.tmp
