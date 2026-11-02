@@ -211,7 +211,7 @@ def score_claim(sample, target, context):
         decisions=dict.fromkeys(context["variants"]), reasons={}, boundary_issues=[],
         baseline_consistent=False, status="ok", error="")
     try:
-        baseline = gui.predict_with_session_model(sample["path"], model)
+        baseline = gui.predict_with_session_model_baseline(sample["path"], model)
         row["baseline"], row["app_reason"] = baseline["decision"], baseline["reject_reason"]
         if baseline.get("rejection_stage") == "input":
             row.update(status="input_rejected", baseline_consistent=True,

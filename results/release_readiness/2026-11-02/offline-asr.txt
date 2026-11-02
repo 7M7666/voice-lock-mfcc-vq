@@ -1,0 +1,6 @@
+sherpa: 2.0.1 <REPO>\code\python\venv\Lib\site-packages\sherpa_onnx\__init__.py
+DLL onnxruntime.dll
+DLL sherpa-onnx-c-api.dll
+DLL sherpa-onnx-cxx-api.dll
+S01/corridor/S01_corridor_004.wav '芝麻开门'
+S01_wrong/dorm/S01_wrong_003.wav '快快开门'

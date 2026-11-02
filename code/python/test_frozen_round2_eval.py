@@ -144,7 +144,7 @@ class ScoringTests(unittest.TestCase):
             "phrase_delta": .8, "phrase_spectral": .8, "pitch_relative": .5}
         baseline = baseline or {"decision": "lwl2" if raw_phrase <= 1. else "REJECT",
                                 "rejection_stage": "", "reject_reason": ""}
-        with patch.object(runner.gui, "predict_with_session_model", return_value=baseline), \
+        with patch.object(runner.gui, "predict_with_session_model_baseline", return_value=baseline), \
                 patch.object(runner, "raw_scores", return_value={"raw_voice_score": .5,
                     "raw_phrase_score": raw_phrase, "raw_voice_distance": .5,
                     "raw_phrase_distance": raw_phrase}), \
@@ -428,7 +428,7 @@ class FrozenRunnerTests(unittest.TestCase):
                 (runner.srdp, "lbg_codebook"), (runner.gui, "build_session_enrollment_model")]
             checks = [stack.enter_context(patch.object(module, name,
                       side_effect=AssertionError("Fitting forbidden"))) for module, name in forbidden]
-            stack.enter_context(patch.object(runner.gui, "predict_with_session_model", side_effect=self.mock_app))
+            stack.enter_context(patch.object(runner.gui, "predict_with_session_model_baseline", side_effect=self.mock_app))
             stack.enter_context(patch.object(runner, "raw_scores", side_effect=self.mock_raw))
             stack.enter_context(patch.object(runner.structure, "score", side_effect=self.mock_scores))
             result = runner.run(self.manifest_path, self.bundle, self.protocol_path, self.output,
@@ -556,7 +556,7 @@ class FrozenRunnerTests(unittest.TestCase):
         path = runner.ROOT / "data/demo_audio/srdp_dataset/S01/corridor/S01_corridor_004.wav"
         with patch.object(runner.srdp, "lbg_codebook", side_effect=AssertionError("No training")):
             raw = runner.raw_scores(path, model)
-            app = runner.gui.predict_with_session_model(path, model)
+            app = runner.gui.predict_with_session_model_baseline(path, model)
         self.assertEqual(app["voice_score"], f'{raw["raw_voice_score"]:.6f}')
         self.assertEqual(app["passphrase_score"], f'{raw["raw_phrase_score"]:.6f}')
         self.assertEqual(app["voice_passed"], str(raw["raw_voice_score"] <= 1.))

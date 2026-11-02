@@ -122,7 +122,7 @@ class AlgorithmCalibrationTests(unittest.TestCase):
         ]
         profile = gui.build_session_enrollment_model("S01", base, recordings)
         sample = srdp.PROJECT_ROOT / "data/demo_audio/srdp_dataset/S01/corridor/S01_corridor_004.wav"
-        expected = gui.predict_with_session_model(sample, profile)
+        expected = gui.predict_with_session_model_baseline(sample, profile)
         with tempfile.TemporaryDirectory(prefix="srdp_calibrated_user_") as directory:
             path = Path(directory) / "user.npz"
             gui.save_user_model(profile, path)
@@ -131,7 +131,7 @@ class AlgorithmCalibrationTests(unittest.TestCase):
             self.assertEqual(restored.voice_metric, "cohort_ratio")
             self.assertEqual(restored.passphrase_accept_score, 1.0)
             self.assertEqual(set(restored.background_codebooks), {"S02", "S03", "S04"})
-            self.assertEqual(gui.predict_with_session_model(sample, restored), expected)
+            self.assertEqual(gui.predict_with_session_model_baseline(sample, restored), expected)
 
 
 if __name__ == "__main__":

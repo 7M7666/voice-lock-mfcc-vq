@@ -1,0 +1,22 @@
+{
+  "self_correct": {
+    "claims": 24,
+    "A_accept": 17,
+    "E_accept": 17
+  },
+  "self_wrong": {
+    "claims": 36,
+    "A_accept": 1,
+    "E_accept": 0
+  },
+  "other_correct": {
+    "claims": 84,
+    "A_accept": 2,
+    "E_accept": 2
+  },
+  "other_wrong": {
+    "claims": 108,
+    "A_accept": 0,
+    "E_accept": 0
+  }
+}

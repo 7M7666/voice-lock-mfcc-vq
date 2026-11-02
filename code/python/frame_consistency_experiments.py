@@ -231,7 +231,7 @@ def run(args):
                         item = cache.get(path, base, "reenroll_legacy" if policy == "frozen_profile" else policy)
                         result = score_branches(item, model)
                         if policy == "frozen_profile":
-                            reference = gui.predict_with_session_model(path, model)
+                            reference = gui.predict_with_session_model_baseline(path, model)
                             assert result["decision"] == reference["decision"]
                             assert abs(float(result["voice_score"]) - float(reference["voice_score"])) <= 2e-6
                             assert abs(float(result["passphrase_score"]) - float(reference["passphrase_score"])) <= 2e-6

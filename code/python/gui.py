@@ -72,7 +72,7 @@ from srdp import (
 from speech_frames import recording_quality
 from user_cleanup import build_user_cleanup, execute_user_cleanup
 from runtime_paths import runtime_data_root
-from asr_phrase import recognize_fixed_phrase, normalize_text
+from asr_phrase import AsrError, recognize_fixed_phrase, normalize_text
 
 
 SAMPLE_RATE = 16000
@@ -711,7 +711,12 @@ def predict_with_session_model(wav_path: Path, session_model: SessionEnrollmentM
     result = dict(predict_with_session_model_baseline(wav_path, session_model))
     if result.get("decision") == "REJECT":
         return {**result, "asr_text": "", "asr_passed": ""}
-    text = recognize_fixed_phrase(wav_path)
+    try:
+        text = recognize_fixed_phrase(wav_path)
+    except AsrError:
+        raise
+    except Exception as exc:
+        raise AsrError(f"离线语音识别失败：{exc}") from exc
     passed = normalize_text(text) == "芝麻开门"
     result.update(asr_text=text, asr_passed=str(passed))
     if not passed:
@@ -777,9 +782,13 @@ class MfccCanvas(FigureCanvas):
         self.draw()
 
 
+class RecordingError(RuntimeError):
+    """Microphone capture failed before verification started."""
+
+
 class SessionTaskWorker(QThread):
     completed = Signal(object)
-    failed = Signal(str)
+    failed = Signal(object)
     stage = Signal(str)
     progress = Signal(float, float)
 
@@ -794,7 +803,12 @@ class SessionTaskWorker(QThread):
 
     def record(self, prefix, duration, sample_rate):
         self.checkpoint()
-        path = record_audio_to_temp(prefix, duration, sample_rate, cancel=self.cancel, progress=self.progress.emit)
+        try:
+            path = record_audio_to_temp(prefix, duration, sample_rate, cancel=self.cancel, progress=self.progress.emit)
+        except TaskCancelled:
+            raise
+        except Exception as exc:
+            raise RecordingError(str(exc)) from exc
         self.checkpoint()
         return path
 
@@ -806,7 +820,7 @@ class SessionTaskWorker(QThread):
         except TaskCancelled:
             pass
         except Exception as error:
-            self.failed.emit(str(error))
+            self.failed.emit(error)
 
 
 class PredictWorker(QObject):
@@ -1489,7 +1503,7 @@ class SrdpVoiceLockWindow(QMainWindow):
             if session_model_fingerprint(model) != row.model_fingerprint:
                 raise ValueError("模型快照与原记录不一致")
             result = predict_with_session_model(path, model)
-        except (OSError, ValueError, KeyError) as error:
+        except (OSError, ValueError, KeyError, AsrError) as error:
             QMessageBox.warning(self, "复核失败", str(error))
             return
         QMessageBox.information(self, "录音复核结果", f"原判定：{row.decision}；复核判定：{result['decision']}。\n声纹分数：{row.voice_score} → {result['voice_score'] or '-'}\n口令模板分数：{row.passphrase_score} → {result['passphrase_score'] or '-'}\n{PHRASE_EXPLANATION}\n使用当时模型和当前算法重新分析，没有改写原记录。")
@@ -1602,10 +1616,16 @@ class SrdpVoiceLockWindow(QMainWindow):
             self.enroll_status_label.setText("本次未完成，已有录音保留，可以重试。")
         elif self.session_kind == "microphone":
             self.mic_label.setText("麦克风: 测试失败")
-        else:
+        elif isinstance(message, AsrError):
+            self.temp_verify_result_label.setText("离线语音识别失败")
+            self.temp_verify_reason_label.setText("本次没有产生验证结果，请检查离线语音识别模型或依赖后重试。")
+        elif isinstance(message, RecordingError):
             self.temp_verify_result_label.setText("本次录音失败")
             self.temp_verify_reason_label.setText("本次没有产生验证结果，请检查麦克风后重试。")
-        QMessageBox.critical(self, "操作未完成", message)
+        else:
+            self.temp_verify_result_label.setText("本次验证失败")
+            self.temp_verify_reason_label.setText("本次没有产生验证结果，请查看错误详情并检查用户模型后重试。")
+        QMessageBox.critical(self, "操作未完成", str(message))
 
     def on_session_completed(self, payload):
         if self.session_cancel.is_set() or self.close_requested:
@@ -1973,6 +1993,7 @@ class SrdpVoiceLockWindow(QMainWindow):
         self.start_session_task("verification", job)
 
     def verify_temporary_audio(self, wav_path: Path) -> None:
+        self.reset_user_verdict()
         try:
             start = time.perf_counter()
             result = predict_with_session_model(wav_path, self.session_model)
@@ -1980,8 +2001,8 @@ class SrdpVoiceLockWindow(QMainWindow):
             self.verify_waveform_canvas.plot_wav(wav_path)
             self.verify_mfcc_canvas.plot_wav(wav_path)
         except Exception as exc:
-            self.temp_verify_result_label.setText("验证结果: 验证失败")
-            self.temp_verify_reason_label.setText("本次未得到有效判定，请重试。")
+            self.temp_verify_result_label.setText("离线语音识别失败" if isinstance(exc, AsrError) else "验证结果: 验证失败")
+            self.temp_verify_reason_label.setText("请检查离线语音识别模型或依赖后重试。" if isinstance(exc, AsrError) else "本次未得到有效判定，请重试。")
             self.status_label.setText("模型: 已加载" if self.model is not None else "模型: 未加载")
             QMessageBox.critical(self, "用户验证失败", str(exc))
             return

@@ -1,0 +1,46 @@
+Window: "SRDP 轻量化声音锁演示系统", App: SRDPVoiceLock.exe.
+	0 窗口 (settable, string) SRDP 轻量化声音锁演示系统 Secondary Actions: Raise ID: QApplication.SrdpVoiceLockWindow
+		1 标题栏 (settable, string) Value: SRDP 轻量化声音锁演示系统
+			2 菜单栏 系统 ID: MenuBar
+				3 菜单项目 系统
+			4 按钮 最小化
+			5 按钮 最大化
+			6 按钮 关闭
+		7 组 (settable, string) ID: QApplication.SrdpVoiceLockWindow.QWidget
+			8 自定义 (settable, string) ID: QApplication.SrdpVoiceLockWindow.QWidget.Header
+				9 文本 基于 MFCC 与 VQ 的多特征融合声音锁原型系统 ID: QApplication.SrdpVoiceLockWindow.QWidget.Header.QLabel
+				10 文本 模型: 已加载 ID: QApplication.SrdpVoiceLockWindow.QWidget.Header.QLabel
+				11 文本 麦克风: 未检测 ID: QApplication.SrdpVoiceLockWindow.QWidget.Header.QLabel
+			12 自定义 (settable, string) ID: QApplication.SrdpVoiceLockWindow.QWidget.Sidebar
+				13 复选框 (settable, string) 声音验证 ID: QApplication.SrdpVoiceLockWindow.QWidget.Sidebar.QPushButton
+				14 复选框 (settable, string) 注册用户 ID: QApplication.SrdpVoiceLockWindow.QWidget.Sidebar.QPushButton
+				15 复选框 (settable, string) 验证记录 ID: QApplication.SrdpVoiceLockWindow.QWidget.Sidebar.QPushButton
+				16 复选框 (settable, string) 项目实验 ID: QApplication.SrdpVoiceLockWindow.QWidget.Sidebar.QPushButton
+				17 复选框 (settable, string) 设置 ID: QApplication.SrdpVoiceLockWindow.QWidget.Sidebar.QPushButton
+			18 窗格 (settable, string) ID: QApplication.SrdpVoiceLockWindow.QWidget.QStackedWidget
+				86 组 (settable, string) ID: QApplication.SrdpVoiceLockWindow.QWidget.QStackedWidget.QWidget
+					87 文本 声音验证 ID: QApplication.SrdpVoiceLockWindow.QWidget.QStackedWidget.QWidget.QLabel
+					88 文本 选择你的用户，点击录音，然后说“芝麻开门”。 ID: QApplication.SrdpVoiceLockWindow.QWidget.QStackedWidget.QWidget.QLabel
+					89 文本 验证用户 ID: QApplication.SrdpVoiceLockWindow.QWidget.QStackedWidget.QWidget.QLabel
+					90 组合框 (settable, string) Value: S01 ID: QApplication.SrdpVoiceLockWindow.QWidget.QStackedWidget.QWidget.QComboBox
+					91 按钮 (settable, string) 注册新用户 ID: QApplication.SrdpVoiceLockWindow.QWidget.QStackedWidget.QWidget.QPushButton
+					92 按钮 (settable, string) 删除所选用户 ID: QApplication.SrdpVoiceLockWindow.QWidget.QStackedWidget.QWidget.QPushButton
+					93 复选框 (settable, string) 删除用户时，同时清理该账户在App中的关联录音、记录和快照 ID: QApplication.SrdpVoiceLockWindow.QWidget.QStackedWidget.QWidget.QCheckBox
+					94 文本 当前验证用户：S01 ID: QApplication.SrdpVoiceLockWindow.QWidget.QStackedWidget.QWidget.QLabel
+					95 文本 录音时长 ID: QApplication.SrdpVoiceLockWindow.QWidget.QStackedWidget.QWidget.QLabel
+					96 沙网 (settable, float) Value: 3 ID: QApplication.SrdpVoiceLockWindow.QWidget.QStackedWidget.QWidget.QDoubleSpinBox
+					97 按钮 (settable, string) 开始录音验证 ID: QApplication.SrdpVoiceLockWindow.QWidget.QStackedWidget.QWidget.PrimaryButton
+					98 按钮 (disabled, settable, string) 取消本次操作 ID: QApplication.SrdpVoiceLockWindow.QWidget.QStackedWidget.QWidget.QPushButton
+					99 进度栏 Value: -1 ID: QApplication.SrdpVoiceLockWindow.QWidget.QStackedWidget.QWidget.QProgressBar
+					100 文本 录音电平: 等待开始 ID: QApplication.SrdpVoiceLockWindow.QWidget.QStackedWidget.QWidget.QLabel
+					101 文本 等待录音 ID: QApplication.SrdpVoiceLockWindow.QWidget.QStackedWidget.QWidget.VerdictIdle
+					102 文本 请用 S01 的声音说“芝麻开门”。 ID: QApplication.SrdpVoiceLockWindow.QWidget.QStackedWidget.QWidget.QLabel
+					103 文本 口令模板匹配比较声音相似度；个人验证还使用离线语音识别检查口令文字。 ID: QApplication.SrdpVoiceLockWindow.QWidget.QStackedWidget.QWidget.QLabel
+					104 按钮 (settable, string) 查看验证记录 ID: QApplication.SrdpVoiceLockWindow.QWidget.QStackedWidget.QWidget.QPushButton
+					105 复选框 (settable, string) 查看分数与录音特征 ID: QApplication.SrdpVoiceLockWindow.QWidget.QStackedWidget.QWidget.QPushButton
+
+Document text: ```
+基于 MFCC 与 VQ 的多特征融合声音锁原型系统
+模型: 已加载
+麦克风: 未检测
+```

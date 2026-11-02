@@ -30,14 +30,16 @@ def main():
     assert len(wavs) == 9, [str(p.relative_to(internal)) for p in wavs]
     for wav in wavs:
         assert sha256(wav) == sha256(root / wav.relative_to(internal))
-    forbidden = {"app_data", "gui_recordings", "diagnostics"}
-    assert not any(forbidden & set(p.relative_to(app).parts) for p in app.rglob("*"))
+    forbidden = {"app_data", "gui_recordings", "gui_history", "diagnostics", "users", "venv", ".venv", ".git", "history.csv"}
+    assert not any(forbidden & {part.lower() for part in p.relative_to(app).parts} for p in app.rglob("*"))
     packages = {}
     for dist in metadata.distributions():
         name = dist.metadata["Name"]
         packages[name] = dist.version
         for file in dist.files or []:
-            if any("license" in part.lower() or part.lower().startswith("copying") for part in file.parts):
+            if (file.suffix.lower() not in {".py", ".pyc", ".pyo"}
+                    and "__pycache__" not in file.parts
+                    and any("license" in part.lower() or part.lower().startswith("copying") for part in file.parts)):
                 source = Path(dist.locate_file(file))
                 if source.is_file():
                     target = app / "licenses" / name / str(file).replace("..", "_")
@@ -54,6 +56,7 @@ def main():
                     "code/python/dtw_paths.py", "code/python/speech_frames.py", "code/python/user_cleanup.py",
                     "packaging/windows_entry.py", "packaging/voice_lock.spec")},
                 packages=packages, bundled_wav_count=9,
+                distribution_status="local-validation-only; ASR model redistribution not cleared",
                 private_app_data_included=False, layout="PyInstaller onedir",
                 user_data="%LOCALAPPDATA%/SRDPVoiceLock")
     (app / "build-info.json").write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")

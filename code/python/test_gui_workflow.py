@@ -505,6 +505,50 @@ class GuiWorkflowTests(unittest.TestCase):
         self.assertTrue(self.window.temp_verify_button.isEnabled())
         self.assertTrue(all(button.isEnabled() for button in self.window.nav_buttons))
 
+    def test_asr_failure_is_not_reported_as_microphone_failure(self):
+        self.seed_user("测试用户")
+        self.window.verify_temporary_audio(self.sample)
+        for message in ("模型加载失败", "推理失败"):
+            with self.subTest(message=message), patch.object(gui, "record_audio_to_temp", return_value=self.sample), patch.object(
+                gui, "recognize_fixed_phrase", side_effect=RuntimeError(message)
+            ), patch.object(QMessageBox, "critical") as dialog:
+                self.window.verify_temporary_user_by_recording()
+                self.wait_session()
+                self.assertEqual(self.window.temp_verify_result_label.text(), "离线语音识别失败")
+                self.assertIn("模型或依赖", self.window.temp_verify_reason_label.text())
+                self.assertNotIn("麦克风", self.window.temp_verify_reason_label.text())
+                self.assertIn(message, dialog.call_args.args[2])
+                self.assertEqual(self.window.temp_verify_score_label.text(), "分数: -")
+                self.assertEqual(len(self.window.history), 1)
+                self.assertTrue(self.window.temp_verify_button.isEnabled())
+
+    def test_computation_failure_does_not_blame_microphone(self):
+        self.seed_user("测试用户")
+        with patch.object(gui, "record_audio_to_temp", return_value=self.sample), patch.object(
+            gui, "predict_with_session_model_baseline", side_effect=ValueError("模型计算失败")
+        ), patch.object(QMessageBox, "critical"):
+            self.window.verify_temporary_user_by_recording()
+            self.wait_session()
+        self.assertEqual(self.window.temp_verify_result_label.text(), "本次验证失败")
+        self.assertNotIn("麦克风", self.window.temp_verify_reason_label.text())
+        self.assertEqual(len(self.window.history), 0)
+
+    def test_asr_rejection_is_a_saved_result_and_failure_during_replay_keeps_it(self):
+        self.seed_user("测试用户")
+        with patch.object(gui, "recognize_fixed_phrase", return_value="芝麻关门"):
+            self.window.verify_temporary_audio(self.sample)
+        self.assertEqual(self.window.temp_verify_result_label.text(), "未通过")
+        self.assertEqual(self.window.history[0].rejection_stage, "asr")
+        self.assertEqual(self.window.history[0].asr_passed, "False")
+        self.window.full_history_table.selectRow(0)
+        with patch.object(gui, "recognize_fixed_phrase", side_effect=RuntimeError("模型加载失败")), patch.object(
+            QMessageBox, "warning"
+        ) as dialog:
+            self.window.replay_history_record()
+        self.assertIn("模型加载失败", dialog.call_args.args[2])
+        self.assertEqual(len(self.window.history), 1)
+        self.assertEqual(self.window.history[0].asr_text, "芝麻关门")
+
     def test_recording_locks_user_and_navigation_until_finished(self):
         self.seed_user("测试用户")
         released = Event()
