@@ -53,10 +53,10 @@ def main():
                 source_tree_dirty=bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True).strip()),
                 source_sha256={name: sha256(root / name) for name in (
                     "code/python/gui.py", "code/python/srdp.py", "code/python/asr_phrase.py", "code/python/runtime_paths.py",
-                    "code/python/dtw_paths.py", "code/python/speech_frames.py", "code/python/user_cleanup.py",
+                    "code/python/dtw_paths.py", "code/python/dtw_calibration.py", "code/python/speech_frames.py", "code/python/user_cleanup.py",
                     "packaging/windows_entry.py", "packaging/voice_lock.spec")},
                 packages=packages, bundled_wav_count=9,
-                distribution_status="local-validation-only; ASR model redistribution not cleared",
+                distribution_status="course-prototype; ASR model redistribution not independently cleared",
                 private_app_data_included=False, layout="PyInstaller onedir",
                 user_data="%LOCALAPPDATA%/SRDPVoiceLock")
     (app / "build-info.json").write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -153,6 +153,28 @@ class GuiWorkflowTests(unittest.TestCase):
         self.assertTrue(report["samples"][3]["consistency_check"]["flagged"])
         self.assertTrue(report["samples"][3]["accepted"])
 
+    def test_disconnected_coverage_requires_review_and_keeps_all_samples_on_continue(self):
+        self.record_registration("分组用户")
+        coverage = {"warning": True, "components": [[0, 1], [2, 3]]}
+        checks = [dict(voice_distance=1., passphrase_distance=1., flagged=False,
+                       phrase_coverage=coverage) for _ in range(gui.ENROLLMENT_REQUIRED)]
+        with patch.object(gui, "enrollment_consistency_check", return_value=checks), \
+             patch.object(QMessageBox, "question", return_value=QMessageBox.No) as question, \
+             patch.object(gui, "build_session_enrollment_model") as build:
+            self.window.complete_registration()
+            self.wait_session()
+        build.assert_not_called()
+        self.assertIn("2组", question.call_args.args[2])
+        self.assertIn("不建议仅删除差异大的样本", question.call_args.args[2])
+        self.assertEqual(self.window.accepted_enrollment_count(), 4)
+        with patch.object(gui, "enrollment_consistency_check", return_value=checks), \
+             patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
+            self.window.complete_registration()
+            self.wait_session()
+        self.assertEqual(len(self.window.session_model.passphrase_templates), 4)
+        report = json.loads(next((self.root / "diagnostics/enrollments").glob("*.json")).read_text(encoding="utf-8"))
+        self.assertEqual(report["phrase_coverage"], coverage)
+
     def test_cancel_consistency_does_not_build_or_save_a_model(self):
         self.record_registration("新用户")
         started, released = Event(), Event()

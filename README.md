@@ -4,22 +4,22 @@
 
 ## 版本与完成状态
 
-截至 **2026-11-02**，请区分以下版本：
+截至 **2026-11-04**，请区分以下版本：
 
 | 对象 | 实际状态 |
 |---|---|
-| [v1.0.0 Windows Release](https://github.com/7M7666/voice-lock-mfcc-vq/releases/tag/v1.0.0) | 已发布旧版，MFCC + LBG-VQ 声纹、MFCC + DTW 口令模板双层验证；**不含 E / ASR** |
-| 当前 `master` | 已接入 E：原双层接受后，再由 sherpa-onnx Paraformer 离线检查文字；不是已发布 Windows 版本 |
-| 新 Windows 版本 | 发行准备和本机构建验证见[验收记录](docs/Windows发行准备验收.md)；尚未正式发布，仍需干净电脑与真人独立验收、权重许可确认 |
+| [v1.1.0 Windows Release](https://github.com/7M7666/voice-lock-mfcc-vq/releases/tag/v1.1.0) | 当前课程原型：VQ / DTW 后串联离线 ASR，新增注册样本覆盖提醒；保留原阈值 |
+| [v1.0.0 Windows Release](https://github.com/7M7666/voice-lock-mfcc-vq/releases/tag/v1.0.0) | 旧版，MFCC + LBG-VQ 声纹、MFCC + DTW 口令模板双层验证；**不含 E / ASR** |
+| 验收与许可 | 本机发行准备记录见[验收记录](docs/Windows发行准备验收.md)；真人独立验收、干净电脑完整验收及模型完整再分发许可核查仍未完成，按项目所有者要求发布不表示这些项目通过 |
 | ECAPA 等候选 | 保存在实验分支，未部署到正式 App；本轮不研究或调参 |
 
 已实现注册质量检查、个人模型保存加载、验证历史、取消和复核。**新用户现场注册、冒充测试、跨设备及回放防护没有充分的独立验收证据**，不能将课程原型视为可靠门禁产品，也不编造通过率。
 
 ## Windows 下载
 
-下载 [v1.0.0 Windows x64 ZIP](https://github.com/7M7666/voice-lock-mfcc-vq/releases/download/v1.0.0/SRDPVoiceLock-1.0.0-windows-x64.zip)，完整解压后双击 `SRDPVoiceLock.exe`；保留旁边的 `_internal`。无需 Python 或 MATLAB。Release 页的 Source code 是源码归档。
+下载 [v1.1.0 Windows x64 ZIP](https://github.com/7M7666/voice-lock-mfcc-vq/releases/download/v1.1.0/SRDPVoiceLock-1.1.0-windows-x64.zip)，完整解压后双击 `SRDPVoiceLock.exe`；保留旁边的 `_internal`。无需 Python 或 MATLAB。Release 页的 Source code 是源码归档。
 
-这是**旧双层版本**。本仓库当前的[Windows 启动说明](packaging/Windows启动说明.md)描述正在准备的含 E 版本，不表示下载的 v1.0.0 已含 ASR。没有发布新版之前，不将本地验收包作为公开发行包传播。
+本版包含离线 ASR，操作与数据位置见[Windows 启动说明](packaging/Windows启动说明.md)。模型和依赖随包提供，运行时不下载。
 
 ## 源码运行
 
@@ -47,7 +47,7 @@ Windows 构建依赖有版本锁定；[源码依赖](code/python/requirements.tx
 
 1. 在“注册用户”输入名称，每条自然说出“芝麻开门”，录音首尾留少量空白。
 2. 必须取得 **4 条合格录音**：总长 1.2–5 秒、持续有效声音至少 0.65 秒、估计 SNR 至少 10 dB、质量评分小于 0.35，且无削波或首尾截断标记。不合格录音不计数，可移除后补录。
-3. 四条后完成注册；一致性异常会提示复核。保存个人模型并返回“声音验证”。注册自检只使用注册样本，不能算独立认证验收。
+3. 四条后完成注册；一致性异常或模板按当前阈值分成互不连通的组时，会在建模前提示复核，可保留全部合格样本继续。保存个人模型并返回“声音验证”。覆盖提醒不能判断口令是否完整或正确；注册自检不能算独立认证验收。
 4. 选择账号，用新录音验证。先通过 VQ 与 DTW，再要求 ASR 规范化转写严格等于“芝麻开门”。错误文字正常拒绝；麦克风错误与 ASR 错误分别提示，错误操作不新增成功历史。
 5. 在“验证记录”查看最近 20 条个人验证、导出或复核。退出重启后恢复用户和历史；旧历史缺少的 ASR 字段留空。旧记录复核使用当前算法，不改写原记录。
 
@@ -61,15 +61,17 @@ Windows 构建依赖有版本锁定；[源码依赖](code/python/requirements.tx
 
 99 条正式录音及历史数据划分、56/63 自动识别成绩、252 次账号声明回归等详细依据见[结果说明](results/README_结果说明.md)与[历史开发主线](docs/结题改造主线.md)。已有数据多次参与开发；多账号声明不是新增独立录音，小样本零误通过不证明总体风险为零。
 
+2026-11-02 的个人 DTW 阈值校准对照只作为离线候选：四条注册开发回放改善，但迁移到旧 252 次声明增加了冒充误接受，因此未替换正式阈值。实验入口和结果边界见[阈值校准记录](docs/结题改造主线.md#2026-11-02-个人dtw阈值校准对照)。
+
 ## 测试与 Windows 构建
 
 ```powershell
 .\code\python\venv\Scripts\python.exe -m unittest discover -s code/python -p 'test_*.py' -v
-# 以下只在本机生成含模型的验收包；许可未确认前禁止公开上传
+# 以下在本机生成含模型的验收包
 .\packaging\build_windows.ps1 -Version dev-local -Output tmp_release/new-local-build
 ```
 
-输出目录必须不存在，可用 `-AsrModelDir` 指定构建模型目录。构建校验模型哈希、收集 DLL 和有限资源，生成 onedir、文件清单和本地 ZIP；**构建成功不代表发布获准**。完整结果、EXE 自检及尚缺的实机/真人项目见[Windows 发行准备验收](docs/Windows发行准备验收.md)。
+输出目录必须不存在，可用 `-AsrModelDir` 指定构建模型目录。构建校验模型哈希、收集 DLL 和有限资源，生成 onedir、文件清单和本地 ZIP。历史结果及尚缺的实机/真人项目见[Windows 发行准备验收](docs/Windows发行准备验收.md)，本次构建与验证以 v1.1.0 Release 说明为准。
 
 `pipeline` 会覆盖特征、基础模型和结果；`smoke-test --skip-pipeline` 仍会改写推荐配置表，二者均不是只读启动检查，本轮未执行。历史实验入口不是新用户使用步骤，部分依赖的私人 WAV 已缺失，不承诺全部可重放。
 
