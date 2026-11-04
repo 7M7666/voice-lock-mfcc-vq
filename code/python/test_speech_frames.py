@@ -113,6 +113,13 @@ class EnrollmentConsistencyTests(unittest.TestCase):
         for original, matrix in zip(originals, features):
             np.testing.assert_array_equal(original, matrix)
 
+    def test_two_consistent_groups_are_visible_without_marking_every_take_as_an_outlier(self):
+        features = [np.full((30, 31), value, dtype=np.float32) for value in (0., .1, 10., 10.1)]
+        checks = gui.enrollment_consistency_check(features, self.model)
+        self.assertFalse(any(row["flagged"] for row in checks))
+        self.assertEqual(checks[0]["phrase_coverage"]["components"], [[0, 1], [2, 3]])
+        self.assertTrue(checks[0]["phrase_coverage"]["warning"])
+
     def test_repeated_and_slower_identical_feature_sequences_are_not_flagged(self):
         sample = np.repeat(np.arange(5, dtype=np.float32), 6)[:, None] * np.ones((1, 31), dtype=np.float32)
         for last in (sample, np.repeat(sample, 2, axis=0)):

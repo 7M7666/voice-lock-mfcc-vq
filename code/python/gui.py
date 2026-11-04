@@ -73,6 +73,7 @@ from speech_frames import recording_quality
 from user_cleanup import build_user_cleanup, execute_user_cleanup
 from runtime_paths import runtime_data_root
 from asr_phrase import AsrError, recognize_fixed_phrase, normalize_text
+from dtw_calibration import coverage_check
 
 
 SAMPLE_RATE = 16000
@@ -521,8 +522,11 @@ def enrollment_consistency_check(features: list[np.ndarray], model) -> list[dict
     deviation = np.median(np.abs(scores - center), axis=0)
     limits = np.maximum(np.maximum(center * ENROLLMENT_OUTLIER_RATIO,
         center + ENROLLMENT_OUTLIER_MAD_FACTOR * deviation), ENROLLMENT_DISTANCE_EPSILON)
+    coverage = coverage_check(distances[:, :, 1], getattr(model, "calibration_mode", "legacy"),
+        getattr(model, "passphrase_aggregate", "min"))
     return [{"voice_distance": float(score[0]), "passphrase_distance": float(score[1]),
         "voice_advisory_limit": float(limits[0]), "passphrase_advisory_limit": float(limits[1]),
+        "phrase_coverage": coverage,
         "flagged": bool(np.any(~np.isfinite(score)) or np.any(score > limits))} for score in scores]
 
 
@@ -1926,6 +1930,7 @@ class SrdpVoiceLockWindow(QMainWindow):
                 "model_fingerprint": session_model_fingerprint(model), "voice_threshold": model.voice_threshold,
                 "passphrase_threshold": model.passphrase_threshold, "vad_mode": model.vad_mode,
                 "cepstral_normalization": model.cepstral_normalization, "samples": samples,
+                "phrase_coverage": consistency[0].get("phrase_coverage", {}),
                 "consistency_limitation": "Batch-relative median/MAD advisory only; not a validated rejection rule or phrase transcription",
                 "limitation": "Training-recording self-check only; not independent verification or wrong-passphrase validation"}
             return model, checks, report, path
@@ -1942,10 +1947,18 @@ class SrdpVoiceLockWindow(QMainWindow):
             (index for index, take in enumerate(takes, start=1) if take.accepted), checks))
         self.refresh_enrollment_list()
         flagged = [index for index, check in self.enrollment_consistency.items() if check["flagged"]]
-        if flagged:
-            message = "\n".join(f"第{index}条录音与其他注册样本差异较大，建议重新录制。" for index in flagged)
+        coverage = checks[0].get("phrase_coverage", {}) if checks else {}
+        if flagged or coverage.get("warning"):
+            messages = [f"第{index}条录音与其他注册样本差异较大，建议重新录制。" for index in flagged]
+            if coverage.get("warning"):
+                take_indices = list(self.enrollment_consistency)
+                groups = ["、".join(str(take_indices[i]) for i in group) for group in coverage["components"]]
+                messages.append(f"按当前口令阈值，注册样本分为{len(groups)}组（" + "；".join(groups)
+                    + "），组间没有低于阈值的匹配，留一自检通过仍可能覆盖不足。"
+                    "请检查口令是否完整、录音是否干净；不建议仅删除差异大的样本，以免丢失正常发音变化。")
+            message = "\n".join(messages)
             self.enroll_status_label.setText(message)
-            self.enroll_take_list.setCurrentRow(flagged[0] - 1)
+            self.enroll_take_list.setCurrentRow((flagged[0] if flagged else next(iter(self.enrollment_consistency))) - 1)
             if QMessageBox.question(self, "注册样本差异提醒", message
                 + "\n差异也可能来自正常语速和发音变化，不能据此判断说错口令。"
                 "此提醒尚未经过独立验证，不是自动拒绝规则。\n仍使用全部合格样本继续注册？",
